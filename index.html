@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Subatomic renderer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <canvas id="canvas" aria-label="Hydrogen orbital visualization"></canvas>
+
+    <header class="panel panel--header">
+      <p class="eyebrow">Wavefunction laboratory</p>
+      <h1 class="title">Subatomic renderer</h1>
+      <p class="lede">
+        Analytic hydrogen ψ<sub>nℓm</sub> on a spherical shell: radial factor at
+        <span class="mono">r ∝ n²</span> a.u., hue encodes phase, relief encodes |ψ|².
+      </p>
+    </header>
+
+    <aside class="panel panel--controls">
+      <div class="field">
+        <label for="n">Principal <span class="mono">n</span></label>
+        <select id="n" class="mono"></select>
+      </div>
+      <div class="field">
+        <label for="l">Azimuthal <span class="mono">ℓ</span></label>
+        <select id="l" class="mono"></select>
+      </div>
+      <div class="field">
+        <label for="m">Magnetic <span class="mono">m</span></label>
+        <select id="m" class="mono"></select>
+      </div>
+      <div class="readout mono" id="labelPrimary">—</div>
+
+      <hr class="divider" />
+
+      <div class="field field--row">
+        <label class="checkbox">
+          <input type="checkbox" id="superposition" />
+          <span>Superposition</span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="n2">Secondary <span class="mono">n</span></label>
+        <select id="n2" class="mono" disabled></select>
+      </div>
+      <div class="field">
+        <label for="l2">Secondary <span class="mono">ℓ</span></label>
+        <select id="l2" class="mono" disabled></select>
+      </div>
+      <div class="field">
+        <label for="m2">Secondary <span class="mono">m</span></label>
+        <select id="m2" class="mono" disabled></select>
+      </div>
+      <div class="field">
+        <label for="mix">Mix weight (secondary)</label>
+        <input type="range" id="mix" min="0" max="100" value="35" disabled />
+        <span class="mono tiny" id="mixVal">0.35</span>
+      </div>
+      <div class="readout mono" id="labelSecondary">—</div>
+
+      <hr class="divider" />
+
+      <div class="field field--row">
+        <label class="checkbox">
+          <input type="checkbox" id="evolve" />
+          <span>Time evolution</span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="time">Time <span class="mono">t</span> (a.u.)</label>
+        <input type="range" id="time" min="0" max="1000" value="0" disabled />
+        <span class="mono tiny" id="timeVal">0.00</span>
+      </div>
+
+      <hr class="divider" />
+
+      <p class="section-label">Import &amp; particles</p>
+      <div class="field">
+        <label for="viewMode">Visualization</label>
+        <select id="viewMode" class="mono">
+          <option value="orbital" selected>Hydrogen orbital</option>
+          <option value="model">Custom mesh (OBJ / FBX)</option>
+        </select>
+      </div>
+      <div class="field field--files">
+        <label class="file-pill">
+          <input type="file" id="fileObj" accept=".obj,.OBJ" hidden />
+          <span>Load OBJ</span>
+        </label>
+        <label class="file-pill">
+          <input type="file" id="fileFbx" accept=".fbx,.FBX" hidden />
+          <span>Load FBX</span>
+        </label>
+      </div>
+      <button type="button" class="btn btn--ghost" id="clearModel">Clear import</button>
+      <button type="button" class="btn btn--ghost" id="proceduralModel">
+        Generate radiolarian shell
+      </button>
+      <div class="readout mono" id="modelStatus">Use Custom mesh, load a file, or generate.</div>
+
+      <div class="field field--row">
+        <label class="checkbox">
+          <input type="checkbox" id="showImportedMesh" checked />
+          <span>Show mesh</span>
+        </label>
+      </div>
+      <div class="field field--row">
+        <label class="checkbox">
+          <input type="checkbox" id="particlesEnabled" checked />
+          <span>Surface particles</span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="particleCount">Particle count</label>
+        <input type="range" id="particleCount" min="500" max="50000" step="500" value="8000" />
+        <span class="mono tiny" id="particleCountVal">8000</span>
+      </div>
+
+      <hr class="divider" />
+
+      <p class="section-label">Display</p>
+      <div class="field field--row">
+        <label class="checkbox">
+          <input type="checkbox" id="atomHalftoneEnabled" />
+          <span>Atomic halftone</span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="atomCellSize">Atom size (px)</label>
+        <input type="range" id="atomCellSize" min="2" max="24" step="1" value="8" />
+        <span class="mono tiny" id="atomCellSizeVal">8</span>
+      </div>
+      <div class="field">
+        <label for="atomStrength">Halftone strength</label>
+        <input type="range" id="atomStrength" min="0" max="100" value="92" />
+        <span class="mono tiny" id="atomStrengthVal">0.92</span>
+      </div>
+      <p class="tiny gizmo-hint">Rebuilds the frame from luminance-scaled dots on a grid.</p>
+
+      <hr class="divider" />
+
+      <p class="section-label">Transform gizmo</p>
+      <div class="field field--row">
+        <label class="checkbox">
+          <input type="checkbox" id="meshSelectEnabled" checked />
+          <span>Selectable meshes</span>
+        </label>
+      </div>
+      <div class="field field--row">
+        <label class="checkbox">
+          <input type="checkbox" id="gizmoEnabled" checked />
+          <span>Show gizmo</span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="gizmoMode">Mode</label>
+        <select id="gizmoMode" class="mono">
+          <option value="translate">Move</option>
+          <option value="rotate">Rotate</option>
+          <option value="scale">Scale</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="gizmoTarget">Target</label>
+        <select id="gizmoTarget" class="mono">
+          <option value="orbital" selected>Orbital sphere</option>
+          <option value="import" disabled>Imported model</option>
+          <option value="selected">Selected mesh</option>
+        </select>
+      </div>
+      <p class="tiny gizmo-hint">
+        Drag axes / rings / boxes. Orbit camera is paused while dragging. Click the scene to select.
+      </p>
+
+      <hr class="divider" />
+
+      <p class="section-label">Liquid simulation</p>
+      <div class="field field--row">
+        <label class="checkbox">
+          <input type="checkbox" id="liquidEnabled" />
+          <span>Enable liquid particles</span>
+        </label>
+      </div>
+      <div class="field">
+        <label for="liquidCount">Particle count</label>
+        <input type="range" id="liquidCount" min="120" max="1200" step="20" value="560" />
+        <span class="mono tiny" id="liquidCountVal">560</span>
+      </div>
+      <div class="field">
+        <label for="liquidViscosity">Viscosity</label>
+        <input type="range" id="liquidViscosity" min="0" max="100" step="1" value="22" />
+        <span class="mono tiny" id="liquidViscosityVal">0.22</span>
+      </div>
+      <p class="tiny gizmo-hint">Simple particle fluid in a circular container around the model.</p>
+
+      <button type="button" class="btn" id="resetCam">Reset camera</button>
+    </aside>
+
+    <div class="panel panel--secondary">
+      <nav class="tab-bar" role="tablist">
+        <button class="tab-btn tab-btn--active" role="tab" data-tab="quantum" aria-selected="true">Observables</button>
+        <button class="tab-btn" role="tab" data-tab="chat" aria-selected="false">Scene AI</button>
+        <button class="tab-btn" role="tab" data-tab="envgen" aria-selected="false">Environment</button>
+      </nav>
+
+      <div class="tab-panel tab-panel--active" id="tab-quantum">
+      <aside class="panel panel--quantum" aria-label="Quantum observables">
+      <p class="section-label">Quantum observables</p>
+
+      <div class="qr-row">
+        <span class="qr-label">State</span>
+        <span class="mono qr-val" id="qr-state">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">Quantum #s</span>
+        <span class="mono qr-val" id="qr-qnums">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">Energy</span>
+        <span class="mono qr-val" id="qr-energy">—</span>
+      </div>
+
+      <hr class="divider" />
+
+      <div class="qr-row">
+        <span class="qr-label">⟨L²⟩</span>
+        <span class="mono qr-val" id="qr-L2">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">⟨Lz⟩</span>
+        <span class="mono qr-val" id="qr-Lz">—</span>
+      </div>
+
+      <hr class="divider" />
+
+      <div class="qr-row">
+        <span class="qr-label">⟨r⟩</span>
+        <span class="mono qr-val" id="qr-r">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">Δr</span>
+        <span class="mono qr-val" id="qr-dr">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">Δr·|p|</span>
+        <span class="mono qr-val" id="qr-hup">—</span>
+      </div>
+
+      <hr class="divider" />
+
+      <div class="qr-row">
+        <span class="qr-label">Degeneracy</span>
+        <span class="mono qr-val" id="qr-degen">—</span>
+      </div>
+      <div class="qr-row" id="qr-transition-row" style="display:none">
+        <span class="qr-label">Transition</span>
+        <span class="mono qr-val" id="qr-transition">—</span>
+      </div>
+
+      <p class="tiny gizmo-hint">Atomic units: ℏ = m_e = e = a₀ = 1. Selection rules: Δℓ = ±1, Δm = 0,±1.</p>
+    </aside>
+      </div><!-- /tab-quantum -->
+
+      <div class="tab-panel" id="tab-chat">
+    <aside class="panel panel--chat" aria-label="Scene AI chat">
+      <p class="section-label">Scene AI <span class="chat-badge">agent</span></p>
+      <div class="chat-config">
+        <div class="chat-config-row">
+          <label class="chat-config-label mono" for="chatApiKey">API key</label>
+          <input type="password" id="chatApiKey" class="mono chat-config-input" placeholder="sk-…" autocomplete="off" />
+        </div>
+        <div class="chat-config-row">
+          <label class="chat-config-label mono" for="chatBaseUrl">Base URL</label>
+          <input type="text" id="chatBaseUrl" class="mono chat-config-input" placeholder="https://api.openai.com/v1" />
+        </div>
+        <div class="chat-config-row">
+          <label class="chat-config-label mono" for="chatModel">Model</label>
+          <input type="text" id="chatModel" class="mono chat-config-input" value="gpt-4o" />
+        </div>
+      </div>
+      <div class="chat-log" id="chatLog"></div>
+      <div class="chat-input-row">
+        <textarea id="chatInput" class="mono chat-input" rows="2"
+          placeholder="Describe a scene… (Enter to send, Shift+Enter for newline)"></textarea>
+        <button type="button" class="btn chat-send" id="chatSend">Send</button>
+      </div>
+      <div class="chat-footer-row">
+        <span class="mono tiny" id="chatStatus">—</span>
+        <button type="button" class="btn btn--ghost chat-clear" id="chatClear">Clear scene</button>
+      </div>
+    </aside>
+      </div><!-- /tab-chat -->
+
+      <div class="tab-panel" id="tab-envgen">
+    <aside class="panel panel--envgen" aria-label="Environment generator">
+      <p class="section-label">Environment generator</p>
+
+      <div class="field">
+        <label for="envPreset">Preset</label>
+        <select id="envPreset" class="mono"></select>
+      </div>
+      <button type="button" class="btn btn--ghost" id="envPresetApply">Apply preset</button>
+
+      <hr class="divider" />
+
+      <p class="tiny gizmo-hint">Generate via LLM — describe any lighting environment.</p>
+      <div class="field">
+        <label for="envPrompt">Description</label>
+        <textarea id="envPrompt" class="mono env-textarea" rows="3"
+          placeholder="e.g. golden hour desert, deep space nebula, neon noir city at night…"></textarea>
+      </div>
+      <div class="field">
+        <label for="envApiKey">OpenAI API key</label>
+        <input type="password" id="envApiKey" class="mono" placeholder="sk-…" autocomplete="off" />
+      </div>
+      <div class="field">
+        <label for="envModel">Model</label>
+        <input type="text" id="envModel" class="mono" value="gpt-4o-mini" />
+      </div>
+      <button type="button" class="btn" id="envGenerate">Generate environment</button>
+      <div class="readout mono" id="envGenStatus">—</div>
+    </aside>
+      </div><!-- /tab-envgen -->
+    </div><!-- /panel--secondary -->
+
+    <footer class="panel panel--footer mono tiny">
+      <div class="legend">
+        <div
+          class="legend__strip"
+          role="img"
+          aria-label="Hue encodes phase from 0 to 2π around the spectrum"
+        ></div>
+        <p class="legend__cap">Hue = arg ψ · relief = |ψ|²</p>
+      </div>
+      <div class="footer-meta">
+        <span id="energyReadout">E = —</span>
+        <span class="sep">|</span>
+        <span>ℏ = m_e = e = a₀ = 1</span>
+      </div>
+    </footer>
+
+    <script>
+      document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const tab = btn.dataset.tab;
+          document.querySelectorAll('.tab-btn').forEach(b => {
+            b.classList.toggle('tab-btn--active', b === btn);
+            b.setAttribute('aria-selected', b === btn ? 'true' : 'false');
+          });
+          document.querySelectorAll('.tab-panel').forEach(p => {
+            p.classList.toggle('tab-panel--active', p.id === 'tab-' + tab);
+          });
+        });
+      });
+    </script>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
