@@ -502,6 +502,102 @@ select:disabled {
   background: rgba(255,255,255,0.04);
   border: 1px solid var(--stroke);
   color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.chat-thinking {
+  align-self: stretch;
+  border: 1px solid var(--stroke);
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.28);
+  overflow: hidden;
+}
+
+.chat-thinking[hidden] {
+  display: none !important;
+}
+
+.chat-thinking__summary {
+  cursor: pointer;
+  font-size: 0.62rem;
+  font-weight: 600;
+  color: var(--accent);
+  padding: 0.25rem 0.5rem;
+  list-style: none;
+  user-select: none;
+}
+
+.chat-thinking__summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-thinking__summary::before {
+  content: '▸ ';
+  display: inline-block;
+  transition: transform 0.12s ease;
+}
+
+.chat-thinking[open] > .chat-thinking__summary::before {
+  transform: rotate(90deg);
+}
+
+.chat-thinking__body {
+  margin: 0;
+  max-height: 14rem;
+  overflow: auto;
+  padding: 0.35rem 0.55rem 0.55rem;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  line-height: 1.45;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.chat-thinking--streaming .chat-thinking__body {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.chat-bubble__text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.chat-bubble__text--pending {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.chat-bubble--sse {
+  animation: chat-sse-pulse 1.2s ease-in-out infinite;
+  border-color: rgba(255, 184, 77, 0.45);
+}
+
+@keyframes chat-sse-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 184, 77, 0.12); }
+  50% { box-shadow: 0 0 12px 1px rgba(255, 184, 77, 0.18); }
+}
+
+.chat-footer-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+
+.chat-sse-badge {
+  font-size: 0.55rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #ffb84d;
+  padding: 0.1em 0.35em;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 184, 77, 0.4);
+  background: rgba(255, 184, 77, 0.08);
 }
 
 .chat-tool {

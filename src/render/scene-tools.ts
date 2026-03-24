@@ -3,6 +3,17 @@ import type { Scene, PerspectiveCamera, WebGLRenderer } from 'three'
 import { createVolumetricCloud, stepCloud as _stepCloud } from './volumetric-cloud'
 import { buildEnvFromConfig } from './env-codegen'
 import type { EnvConfig } from './env-codegen'
+import { buildProceduralTexture } from './procedural-texture'
+import type { ProceduralTextureHandle } from './procedural-texture'
+import {
+  createCrystalClusterGroup,
+  createNoiseSphereGeometry,
+  createRockFieldGroup,
+  createScatterGroup,
+  createTerrainGeometry,
+} from './procedural-objects'
+import { generateTree } from './procedural-tree'
+import type { TreeOptions } from './procedural-tree'
 
 /**
  * Tool definitions + executors for the agentic scene builder.
@@ -33,25 +44,27 @@ function track(ctx: ToolContext, name: string, obj: THREE.Object3D): void {
 
 // ── Executors ────────────────────────────────────────────────────────────────
 
-function execAddMesh(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+function makeGeometryFromToolArgs(a: Record<string, unknown>): THREE.BufferGeometry {
   const p = (a.geometry_params as number[]) ?? []
-  let geo: THREE.BufferGeometry
   switch (String(a.geometry ?? 'sphere').toLowerCase()) {
-    case 'sphere':      geo = new THREE.SphereGeometry(p[0]??1, p[1]??48, p[2]??48); break
-    case 'box':         geo = new THREE.BoxGeometry(p[0]??1, p[1]??1, p[2]??1); break
-    case 'cylinder':    geo = new THREE.CylinderGeometry(p[0]??0.5, p[1]??0.5, p[2]??1, p[3]??32); break
-    case 'torus':       geo = new THREE.TorusGeometry(p[0]??1, p[1]??0.3, p[2]??16, p[3]??100); break
-    case 'torus_knot':  geo = new THREE.TorusKnotGeometry(p[0]??0.8, p[1]??0.25, p[2]??128, p[3]??16); break
-    case 'cone':        geo = new THREE.ConeGeometry(p[0]??0.5, p[1]??1, p[2]??32); break
-    case 'octahedron':  geo = new THREE.OctahedronGeometry(p[0]??1, Math.min(p[1]??0, 5)); break
-    case 'icosahedron': geo = new THREE.IcosahedronGeometry(p[0]??1, Math.min(p[1]??0, 5)); break
-    case 'tetrahedron': geo = new THREE.TetrahedronGeometry(p[0]??1, p[1]??0); break
-    case 'plane':       geo = new THREE.PlaneGeometry(p[0]??2, p[1]??2, p[2]??1, p[3]??1); break
-    case 'ring':        geo = new THREE.RingGeometry(p[0]??0.5, p[1]??1, p[2]??32); break
-    default:            geo = new THREE.SphereGeometry(1, 32, 32)
+    case 'sphere':      return new THREE.SphereGeometry(p[0] ?? 1, p[1] ?? 48, p[2] ?? 48)
+    case 'box':         return new THREE.BoxGeometry(p[0] ?? 1, p[1] ?? 1, p[2] ?? 1)
+    case 'cylinder':    return new THREE.CylinderGeometry(p[0] ?? 0.5, p[1] ?? 0.5, p[2] ?? 1, p[3] ?? 32)
+    case 'torus':       return new THREE.TorusGeometry(p[0] ?? 1, p[1] ?? 0.3, p[2] ?? 16, p[3] ?? 100)
+    case 'torus_knot':  return new THREE.TorusKnotGeometry(p[0] ?? 0.8, p[1] ?? 0.25, p[2] ?? 128, p[3] ?? 16)
+    case 'cone':        return new THREE.ConeGeometry(p[0] ?? 0.5, p[1] ?? 1, p[2] ?? 32)
+    case 'octahedron':  return new THREE.OctahedronGeometry(p[0] ?? 1, Math.min(p[1] ?? 0, 5))
+    case 'icosahedron': return new THREE.IcosahedronGeometry(p[0] ?? 1, Math.min(p[1] ?? 0, 5))
+    case 'tetrahedron': return new THREE.TetrahedronGeometry(p[0] ?? 1, p[1] ?? 0)
+    case 'plane':       return new THREE.PlaneGeometry(p[0] ?? 2, p[1] ?? 2, p[2] ?? 1, p[3] ?? 1)
+    case 'ring':        return new THREE.RingGeometry(p[0] ?? 0.5, p[1] ?? 1, p[2] ?? 32)
+    default:            return new THREE.SphereGeometry(1, 32, 32)
   }
+}
+
+function makePhysicalMaterial(a: Record<string, unknown>): THREE.MeshPhysicalMaterial {
   const opts: THREE.MeshPhysicalMaterialParameters = {
-    color:     new THREE.Color(String(a.color ?? '#aaaaff')),
+    color: new THREE.Color(String(a.color ?? '#aaaaff')),
     metalness: Number(a.metalness ?? 0.1),
     roughness: Number(a.roughness ?? 0.4),
     wireframe: Boolean(a.wireframe ?? false),
@@ -59,13 +72,104 @@ function execAddMesh(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
   }
   if (Number(a.transmission ?? 0) > 0) {
     opts.transmission = Number(a.transmission)
-    opts.thickness    = Number(a.thickness ?? 1.0)
+    opts.thickness = Number(a.thickness ?? 1.0)
   }
   if (a.emissive) {
-    opts.emissive          = new THREE.Color(String(a.emissive))
+    opts.emissive = new THREE.Color(String(a.emissive))
     opts.emissiveIntensity = Number(a.emissive_intensity ?? 1.0)
   }
-  const mat  = new THREE.MeshPhysicalMaterial(opts)
+  return new THREE.MeshPhysicalMaterial(opts)
+}
+
+function execAddProceduralMesh(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  const preset = String(a.preset ?? 'noise_sphere').toLowerCase()
+  const seed = Number(a.seed ?? 1337) | 0
+  const name = String(a.name ?? 'proc')
+  const pos = (a.position as number[]) ?? [0, 0, 0]
+  const rot = a.rotation as number[] | undefined
+  const sc = a.scale
+
+  const mat = () => makePhysicalMaterial(a)
+
+  let root: THREE.Object3D
+
+  switch (preset) {
+    case 'terrain': {
+      const w = Number(a.terrain_width ?? 14)
+      const d = Number(a.terrain_depth ?? 14)
+      const sx = Math.min(128, Math.max(8, Math.floor(Number(a.terrain_segments_x ?? 48))))
+      const sz = Math.min(128, Math.max(8, Math.floor(Number(a.terrain_segments_z ?? 48))))
+      const h = Number(a.height_scale ?? 1.8)
+      const geo = createTerrainGeometry(w, d, sx, sz, h, seed)
+      root = new THREE.Mesh(geo, mat())
+      break
+    }
+    case 'noise_sphere': {
+      const r = Number(a.radius ?? 1)
+      const ws = Math.min(256, Math.max(16, Math.floor(Number(a.width_segments ?? 48))))
+      const hs = Math.min(256, Math.max(16, Math.floor(Number(a.height_segments ?? 48))))
+      const disp = Number(a.displacement ?? 0.35)
+      const geo = createNoiseSphereGeometry(r, ws, hs, disp, seed)
+      root = new THREE.Mesh(geo, mat())
+      break
+    }
+    case 'scatter': {
+      const base = String(a.scatter_geometry ?? 'sphere').toLowerCase() as
+        'sphere' | 'box' | 'cone' | 'tetrahedron' | 'octahedron'
+      const count = Math.min(400, Math.max(1, Math.floor(Number(a.instance_count ?? 24))))
+      const spread = Number(a.spread ?? 4)
+      const smin = Number(a.size_min ?? 0.08)
+      const smax = Number(a.size_max ?? 0.45)
+      root = createScatterGroup(
+        ['sphere', 'box', 'cone', 'tetrahedron', 'octahedron'].includes(base) ? base : 'sphere',
+        count,
+        spread,
+        smin,
+        smax,
+        seed,
+        mat
+      )
+      break
+    }
+    case 'crystal_cluster': {
+      const count = Math.min(200, Math.max(3, Math.floor(Number(a.crystal_count ?? 28))))
+      const spread = Number(a.spread ?? 2.2)
+      const hs = Number(a.height_scale ?? 1)
+      root = createCrystalClusterGroup(count, spread, hs, seed, mat)
+      break
+    }
+    case 'rock_field': {
+      const count = Math.min(300, Math.max(2, Math.floor(Number(a.rock_count ?? 40))))
+      const spread = Number(a.spread ?? 5)
+      const smin = Number(a.size_min ?? 0.12)
+      const smax = Number(a.size_max ?? 0.55)
+      root = createRockFieldGroup(count, spread, smin, smax, seed, mat)
+      break
+    }
+    default:
+      return { ok: false, message: `Unknown procedural preset "${preset}".` }
+  }
+
+  root.position.set(pos[0], pos[1], pos[2])
+  if (rot) root.rotation.set(rot[0], rot[1], rot[2])
+  if (sc !== undefined) {
+    if (Array.isArray(sc)) root.scale.set(sc[0], sc[1], sc[2])
+    else root.scale.setScalar(Number(sc))
+  }
+  root.traverse((o) => {
+    if (o instanceof THREE.Mesh) {
+      o.castShadow = Boolean(a.cast_shadow ?? true)
+      o.receiveShadow = true
+    }
+  })
+
+  track(ctx, name, root)
+  return { ok: true, message: `Procedural "${name}" (${preset}, seed ${seed}) added.` }
+}
+
+function execAddMesh(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  const geo = makeGeometryFromToolArgs(a)
+  const mat  = makePhysicalMaterial(a)
   const mesh = new THREE.Mesh(geo, mat)
   const pos = (a.position as number[]) ?? [0, 0, 0]
   mesh.position.set(pos[0], pos[1], pos[2])
@@ -111,8 +215,8 @@ function execAddCloud(ctx: ToolContext, a: Record<string, unknown>): ToolResult 
     position:  [pos[0], pos[1], pos[2]],
     size:      [sz[0],  sz[1],  sz[2]],
     color:     new THREE.Color(String(a.color ?? '#d8e8f0')).getHex(),
-    density:   Number(a.density  ?? 1.2),
-    coverage:  Number(a.coverage ?? 0.55),
+    density:   Number(a.density  ?? 0.85),
+    coverage:  Number(a.coverage ?? 0.42),
     sunDir:    a.sun_dir  as [number,number,number] | undefined,
     sunColor:  a.sun_color ? new THREE.Color(String(a.sun_color)).getHex() : undefined,
   })
@@ -239,6 +343,360 @@ function execRemoveObject(ctx: ToolContext, a: Record<string, unknown>): ToolRes
   return { ok: true, message: `Object "${name}" removed.` }
 }
 
+function disposeObjectResources(obj: THREE.Object3D): void {
+  obj.traverse((c) => {
+    if (c instanceof THREE.Mesh || c instanceof THREE.Points || c instanceof THREE.Line) {
+      c.geometry?.dispose()
+      const m = c.material
+      if (Array.isArray(m)) m.forEach((x) => (x as THREE.Material).dispose())
+      else (m as THREE.Material | undefined)?.dispose()
+    }
+  })
+}
+
+// ── Procedural texture registry (disposed on reset_scene) ───────────────────
+const _proceduralTextures = new Set<ProceduralTextureHandle>()
+
+function execGenerateTree(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  const name = String(a.name ?? `tree_${Date.now()}`)
+  const pos  = (a.position as number[]) ?? [0, -1.35, 0]
+
+  const treeOpts: TreeOptions = {
+    position:           [pos[0], pos[1], pos[2]],
+    seed:               Number(a.seed ?? Math.floor(Math.random() * 99999)),
+    trunkHeight:        Number(a.trunk_height  ?? 2.5),
+    trunkRadius:        Number(a.trunk_radius  ?? 0.12),
+    crownSize:          (a.crown_size  as [number, number, number]) ?? undefined,
+    crownOffset:        (a.crown_offset as [number, number, number]) ?? undefined,
+    attractorCount:     a.attractor_count != null ? Number(a.attractor_count) : undefined,
+    branchStepSize:     a.branch_step   != null ? Number(a.branch_step)      : undefined,
+    maxIterations:      a.max_iterations != null ? Number(a.max_iterations)   : undefined,
+    pipeExponent:       a.pipe_exponent  != null ? Number(a.pipe_exponent)    : undefined,
+    radialSegments:     a.radial_segments != null ? Number(a.radial_segments) : undefined,
+    leafDensity:        a.leaf_density   != null ? Number(a.leaf_density)     : undefined,
+    leafSize:           a.leaf_size      != null ? Number(a.leaf_size)        : undefined,
+    barkColor:          a.bark_color  ? new THREE.Color(String(a.bark_color)).getHex()  : undefined,
+    leafColor:          a.leaf_color  ? new THREE.Color(String(a.leaf_color)).getHex()  : undefined,
+    leafColorVariation: a.leaf_color_variation != null ? Number(a.leaf_color_variation) : undefined,
+    windStrength:       a.wind_strength != null ? Number(a.wind_strength) : undefined,
+    tropism:            (a.tropism as [number, number, number]) ?? undefined,
+  }
+
+  const { group, update } = generateTree(treeOpts)
+
+  if (a.scale != null) {
+    const s = a.scale
+    if (typeof s === 'number') group.scale.setScalar(s)
+    else if (Array.isArray(s)) group.scale.set(Number(s[0] ?? 1), Number(s[1] ?? 1), Number(s[2] ?? 1))
+  }
+  if (a.rotation) {
+    const r = a.rotation as number[]
+    group.rotation.set(r[0] ?? 0, r[1] ?? 0, r[2] ?? 0)
+  }
+
+  track(ctx, name, group)
+  if (update) ctx.frameFns.push(update)
+
+  const nodeCount = group.children.length
+  return {
+    ok: true,
+    message: `Tree "${name}" generated (space-colonization + da Vinci taper, ${nodeCount} meshes). Base at [${pos.join(',')}].`,
+  }
+}
+
+function execResetScene(ctx: ToolContext, _a: Record<string, unknown>): ToolResult {
+  const n = ctx.added.length
+  for (const obj of [...ctx.added]) {
+    ctx.scene.remove(obj)
+    disposeObjectResources(obj)
+  }
+  ctx.added.length = 0
+  ctx.frameFns.length = 0
+  ctx.registry.clear()
+  for (const h of _proceduralTextures) h.dispose()
+  _proceduralTextures.clear()
+  return { ok: true, message: n ? `Scene reset: removed ${n} top-level object(s).` : 'Scene was already empty.' }
+}
+
+function execGenTexture(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  const domain = String(a.domain ?? 'atomic') as 'atomic' | 'cellular' | 'material'
+  const preset = String(a.preset ?? 'orbital_density')
+  const resolution = Math.min(4096, Math.max(64, Number(a.resolution ?? 512)))
+  const params = (a.params ?? {}) as Record<string, number>
+  const bake = Boolean(a.bake ?? false)
+  const animate = !bake && a.animate !== false
+  const mapSlot = String(a.map_slot ?? 'map') as
+    'map' | 'emissiveMap' | 'normalMap' | 'alphaMap' | 'roughnessMap'
+
+  let handle: ProceduralTextureHandle
+  try {
+    handle = buildProceduralTexture(ctx.renderer, { domain, preset, resolution, params, animate, bake })
+  } catch (e) {
+    return { ok: false, message: `gen_texture error: ${String(e)}` }
+  }
+  _proceduralTextures.add(handle)
+
+  const tex = handle.texture
+  if (mapSlot !== 'normalMap') {
+    tex.colorSpace = THREE.SRGBColorSpace
+  }
+
+  const targetName = String(a.target_name ?? '').trim()
+  if (targetName) {
+    const obj = ctx.registry.get(targetName)
+    if (!obj) return { ok: false, message: `gen_texture: object "${targetName}" not found.` }
+    let foundMesh: THREE.Mesh | undefined
+    obj.traverse((c) => { if (c instanceof THREE.Mesh && !foundMesh) foundMesh = c })
+    if (!foundMesh) return { ok: false, message: `gen_texture: no mesh found under "${targetName}".` }
+    const mat = foundMesh.material as THREE.MeshStandardMaterial | THREE.MeshPhysicalMaterial
+    if (mat && mapSlot in mat) {
+      (mat as unknown as Record<string, unknown>)[mapSlot] = tex
+      mat.needsUpdate = true
+    }
+    if (animate) ctx.frameFns.push((_dt, t) => handle.updateTime(t))
+    return { ok: true, message: `Procedural texture (${domain}/${preset} @${resolution}px) applied to "${targetName}" [${mapSlot}].` }
+  }
+
+  // No target — create a new display plane
+  const name = String(a.name ?? `tex_${preset}`)
+  const geo  = new THREE.PlaneGeometry(2, 2)
+  const mat  = new THREE.MeshStandardMaterial({ [mapSlot]: tex, side: THREE.DoubleSide })
+  if (mapSlot === 'emissiveMap') {
+    (mat as THREE.MeshStandardMaterial).emissive = new THREE.Color(1, 1, 1)
+    ;(mat as THREE.MeshStandardMaterial).emissiveIntensity = 1
+  }
+  const mesh = new THREE.Mesh(geo, mat)
+  const pos = (a.position as number[]) ?? [0, 1.5, 0]
+  mesh.position.set(pos[0] ?? 0, pos[1] ?? 1.5, pos[2] ?? 0)
+  track(ctx, name, mesh)
+
+  if (animate) ctx.frameFns.push((_dt, t) => handle.updateTime(t))
+  return { ok: true, message: `Procedural texture plane "${name}" created (${domain}/${preset} @${resolution}px, animate=${animate}).` }
+}
+
+function makeDataTexture(
+  w: number,
+  h: number,
+  fn: (x: number, y: number, w: number, h: number) => { r: number; g: number; b: number; a: number }
+): THREE.DataTexture {
+  const data = new Uint8Array(w * h * 4)
+  for (let y2 = 0; y2 < h; y2++) {
+    for (let x2 = 0; x2 < w; x2++) {
+      const px = fn(x2, y2, w, h)
+      const i = (y2 * w + x2) * 4
+      data[i]     = Math.max(0, Math.min(255, Math.round(px.r)))
+      data[i + 1] = Math.max(0, Math.min(255, Math.round(px.g)))
+      data[i + 2] = Math.max(0, Math.min(255, Math.round(px.b)))
+      data[i + 3] = Math.max(0, Math.min(255, Math.round(px.a)))
+    }
+  }
+  const tex = new THREE.DataTexture(data, w, h)
+  tex.needsUpdate = true
+  return tex
+}
+
+function parseShaderUniforms(raw: unknown): Record<string, THREE.IUniform> {
+  if (!raw || typeof raw !== 'object') return {}
+  const out: Record<string, THREE.IUniform> = {}
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!v || typeof v !== 'object') continue
+    const u = v as Record<string, unknown>
+    const t = String(u.type ?? 'float')
+    const val = u.value
+    switch (t) {
+      case 'float':
+        out[k] = { value: Number(val ?? 0) }
+        break
+      case 'int':
+        out[k] = { value: Math.floor(Number(val ?? 0)) }
+        break
+      case 'vec2': {
+        const ar = (val as number[]) ?? [0, 0]
+        out[k] = { value: new THREE.Vector2(ar[0], ar[1]) }
+        break
+      }
+      case 'vec3': {
+        const ar = (val as number[]) ?? [0, 0, 0]
+        out[k] = { value: new THREE.Vector3(ar[0], ar[1], ar[2]) }
+        break
+      }
+      case 'vec4': {
+        const ar = (val as number[]) ?? [0, 0, 0, 1]
+        out[k] = { value: new THREE.Vector4(ar[0], ar[1], ar[2], ar[3]) }
+        break
+      }
+      case 'color':
+        out[k] = { value: new THREE.Color(String(val ?? '#ffffff')) }
+        break
+      default:
+        out[k] = { value: Number(val ?? 0) }
+    }
+  }
+  return out
+}
+
+function shaderSide(a: Record<string, unknown>): THREE.Side {
+  const s = String(a.side ?? 'front').toLowerCase()
+  if (s === 'double') return THREE.DoubleSide
+  if (s === 'back') return THREE.BackSide
+  return THREE.FrontSide
+}
+
+function execExecThreejsCode(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  const code = String(a.code ?? '')
+  if (code.length < 1) return { ok: false, message: 'Empty code.' }
+  if (code.length > 100_000) return { ok: false, message: 'Code exceeds 100k characters.' }
+
+  const api = {
+    scene: ctx.scene,
+    camera: ctx.camera,
+    renderer: ctx.renderer,
+    add(obj: THREE.Object3D, name?: string) {
+      ctx.scene.add(obj)
+      ctx.added.push(obj)
+      if (name !== undefined && name !== '') ctx.registry.set(String(name), obj)
+    },
+    remove(obj: THREE.Object3D) {
+      ctx.scene.remove(obj)
+      const ix = ctx.added.indexOf(obj)
+      if (ix !== -1) ctx.added.splice(ix, 1)
+      for (const [k, v] of [...ctx.registry.entries()]) {
+        if (v === obj) ctx.registry.delete(k)
+      }
+    },
+    get(name: string) {
+      return ctx.registry.get(name) ?? null
+    },
+    cloud(opts: Parameters<typeof createVolumetricCloud>[0]) {
+      const mesh = createVolumetricCloud(opts)
+      ctx.scene.add(mesh)
+      ctx.added.push(mesh)
+      ctx.frameFns.push((dt) => _stepCloud(mesh, dt))
+      return mesh
+    },
+    stepCloud: _stepCloud,
+    texture: makeDataTexture,
+    env(config: EnvConfig) {
+      const { envMap } = buildEnvFromConfig(config, ctx.renderer)
+      ctx.applyEnvMap(envMap)
+    },
+    onFrame(fn: (dt: number, t: number) => void) {
+      ctx.frameFns.push(fn)
+    },
+    setBackground(hexOrString: number | string) {
+      if (typeof hexOrString === 'string') ctx.scene.background = new THREE.Color(hexOrString)
+      else ctx.scene.background = new THREE.Color(hexOrString)
+    },
+  }
+
+  try {
+    // eslint-disable-next-line no-new-func
+    const fn = new Function('THREE', 'api', `"use strict";\n${code}`)
+    fn(THREE, api)
+  } catch (e) {
+    return { ok: false, message: `exec_threejs_code: ${String(e)}` }
+  }
+  return { ok: true, message: 'JavaScript executed (THREE + api).' }
+}
+
+/**
+ * Three.js ShaderMaterial with glslVersion: GLSL3 already injects these as
+ * built-in attributes/uniforms. If the LLM re-declares them the GLSL compiler
+ * throws "redefinition". Strip them out before compilation.
+ */
+const THREE_BUILTIN_VERTEX_DECLS = [
+  // attributes
+  /^\s*in\s+vec3\s+position\s*;\s*$/m,
+  /^\s*in\s+vec2\s+uv\s*;\s*$/m,
+  /^\s*in\s+vec3\s+normal\s*;\s*$/m,
+  /^\s*in\s+vec2\s+uv2\s*;\s*$/m,
+  /^\s*in\s+vec4\s+color\s*;\s*$/m,
+  /^\s*attribute\s+vec3\s+position\s*;\s*$/m,
+  /^\s*attribute\s+vec2\s+uv\s*;\s*$/m,
+  /^\s*attribute\s+vec3\s+normal\s*;\s*$/m,
+  // built-in uniforms
+  /^\s*uniform\s+mat4\s+modelMatrix\s*;\s*$/m,
+  /^\s*uniform\s+mat4\s+modelViewMatrix\s*;\s*$/m,
+  /^\s*uniform\s+mat4\s+projectionMatrix\s*;\s*$/m,
+  /^\s*uniform\s+mat4\s+viewMatrix\s*;\s*$/m,
+  /^\s*uniform\s+mat3\s+normalMatrix\s*;\s*$/m,
+  /^\s*uniform\s+vec3\s+cameraPosition\s*;\s*$/m,
+]
+
+function sanitizeVertexShader(src: string): string {
+  let out = src
+  for (const re of THREE_BUILTIN_VERTEX_DECLS) out = out.replace(re, '')
+  return out
+}
+
+function execGenShaderCode(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  const vs = sanitizeVertexShader(String(a.vertex_shader ?? ''))
+  const fs = String(a.fragment_shader ?? '')
+  if (vs.length < 8) return { ok: false, message: 'vertex_shader is required.' }
+  if (fs.length < 8) return { ok: false, message: 'fragment_shader is required.' }
+  if (vs.length > 120_000 || fs.length > 120_000) return { ok: false, message: 'Shader source too long.' }
+
+  let uniforms = parseShaderUniforms(a.uniforms)
+  if (Boolean(a.use_scene_environment) && ctx.scene.environment) {
+    uniforms = { ...uniforms, envMap: { value: ctx.scene.environment } }
+  }
+
+  const mat = new THREE.ShaderMaterial({
+    vertexShader: vs,
+    fragmentShader: fs,
+    uniforms,
+    glslVersion: THREE.GLSL3,
+    side: shaderSide(a),
+  })
+  if (Boolean(a.wireframe)) mat.wireframe = true
+
+  const target = String(a.target_name ?? '').trim()
+  if (target) {
+    const obj = ctx.registry.get(target)
+    if (!obj) return { ok: false, message: `Unknown object "${target}".` }
+    let foundMesh: THREE.Mesh | undefined
+    obj.traverse((c) => {
+      if (c instanceof THREE.Mesh && !foundMesh) foundMesh = c
+    })
+    if (!foundMesh) return { ok: false, message: `No mesh found under "${target}".` }
+    const old = foundMesh.material
+    if (Array.isArray(old)) old.forEach((m) => m.dispose())
+    else old?.dispose()
+    foundMesh.material = mat
+    if (mat.uniforms.uTime !== undefined && a.animate_u_time !== false) {
+      ctx.frameFns.push((_dt, t) => {
+        const u = mat.uniforms.uTime
+        if (u) u.value = t
+      })
+    }
+    return { ok: true, message: `Shader material applied to "${target}".` }
+  }
+
+  const geo = makeGeometryFromToolArgs(a)
+  const mesh = new THREE.Mesh(geo, mat)
+  const pos = (a.position as number[]) ?? [0, 1.2, 0]
+  mesh.position.set(pos[0], pos[1], pos[2])
+  const rot = a.rotation as number[] | undefined
+  if (rot) mesh.rotation.set(rot[0], rot[1], rot[2])
+  const sc = a.scale
+  if (sc !== undefined) {
+    if (Array.isArray(sc)) mesh.scale.set(sc[0], sc[1], sc[2])
+    else mesh.scale.setScalar(Number(sc))
+  }
+  mesh.castShadow = Boolean(a.cast_shadow ?? true)
+  mesh.receiveShadow = true
+  track(ctx, String(a.name ?? 'shaderMesh'), mesh)
+
+  if (mat.uniforms.uTime !== undefined && a.animate_u_time !== false) {
+    ctx.frameFns.push((_dt, t) => {
+      const u = mat.uniforms.uTime
+      if (u) u.value = t
+    })
+  }
+
+  return { ok: true, message: `Mesh "${String(a.name ?? 'shaderMesh')}" created with ShaderMaterial (GLSL3).` }
+}
+
 // ── Tool registry ─────────────────────────────────────────────────────────────
 
 export interface SceneTool {
@@ -282,6 +740,63 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
       },
     },
   },
+  add_procedural_mesh: {
+    execute: execAddProceduralMesh,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'add_procedural_mesh',
+        description:
+          'Create geometry procedurally at runtime (seeded): terrain heightmap, displaced noise sphere, scattered primitives, crystal clusters, or rock fields. Prefer this for forests, landscapes, asteroid fields, organic blobs.',
+        parameters: {
+          type: 'object',
+          required: ['name', 'preset', 'position'],
+          properties: {
+            name: { type: 'string' },
+            preset: {
+              type: 'string',
+              enum: ['terrain', 'noise_sphere', 'scatter', 'crystal_cluster', 'rock_field'],
+              description:
+                'terrain=heightmap ground; noise_sphere=organic blob; scatter=many small meshes; crystal_cluster=cones; rock_field=icosahedron rocks',
+            },
+            seed: { type: 'integer', description: 'Random seed for reproducible variation' },
+            position: { ...VEC3 },
+            rotation: { ...VEC3, description: 'Euler XYZ radians' },
+            scale: { description: 'Uniform number or [x,y,z]' },
+            color: { type: 'string' },
+            metalness: { type: 'number', minimum: 0, maximum: 1 },
+            roughness: { type: 'number', minimum: 0, maximum: 1 },
+            wireframe: { type: 'boolean' },
+            cast_shadow: { type: 'boolean' },
+            terrain_width: { type: 'number' },
+            terrain_depth: { type: 'number' },
+            terrain_segments_x: { type: 'integer' },
+            terrain_segments_z: { type: 'integer' },
+            height_scale: { type: 'number', description: 'Max vertical displacement for terrain' },
+            radius: { type: 'number', description: 'Base radius for noise_sphere' },
+            width_segments: { type: 'integer' },
+            height_segments: { type: 'integer' },
+            displacement: { type: 'number', description: 'Surface noise strength for noise_sphere' },
+            scatter_geometry: {
+              type: 'string',
+              enum: ['sphere', 'box', 'cone', 'tetrahedron', 'octahedron'],
+            },
+            instance_count: { type: 'integer', description: 'Number of scattered meshes' },
+            spread: { type: 'number', description: 'Placement radius for scatter / crystals / rocks' },
+            size_min: { type: 'number' },
+            size_max: { type: 'number' },
+            crystal_count: { type: 'integer' },
+            rock_count: { type: 'integer' },
+            emissive: { type: 'string' },
+            emissive_intensity: { type: 'number' },
+            transmission: { type: 'number' },
+            thickness: { type: 'number' },
+            env_map_intensity: { type: 'number' },
+          },
+        },
+      },
+    },
+  },
   add_light: {
     execute: execAddLight,
     schema: {
@@ -311,7 +826,8 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
       type: 'function',
       function: {
         name: 'add_cloud',
-        description: 'Add a raymarched volumetric cloud / fog volume. Auto-animates drift.',
+        description:
+          'Add a raymarched volumetric cloud (ellipsoid). Keep density 0.6–1.2 and coverage 0.35–0.55 for wispy clouds; higher values look solid and blow out with bloom. Stage floor top is near y≈-1.35 — place ground props above that.',
         parameters: {
           type: 'object',
           required: ['name','position','size'],
@@ -447,6 +963,67 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
       },
     },
   },
+  exec_threejs_code: {
+    execute: execExecThreejsCode,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'exec_threejs_code',
+        description:
+          'Execute a JavaScript snippet with THREE and api (sandboxed). Body only — no import/export. api.add(obj, name?), api.remove(obj), api.get(name), api.cloud(opts), api.stepCloud, api.texture(w,h,fn), api.env(config), api.onFrame(fn), api.setBackground(hex|"#rrggbb"). Use for custom graphs, curves, Groups, BufferGeometry, anything not covered by other tools.',
+        parameters: {
+          type: 'object',
+          required: ['code'],
+          properties: {
+            code: {
+              type: 'string',
+              description:
+                'JavaScript statements. Runs as new Function("THREE","api", code). Max ~100k chars.',
+            },
+          },
+        },
+      },
+    },
+  },
+  gen_shader_code: {
+    execute: execGenShaderCode,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'gen_shader_code',
+        description:
+          'Apply WebGL2 GLSL ES 3.0 shaders (THREE.GLSL3): vertex must use in/out; fragment must declare `out vec4 fragColor` and use in vars matching vertex outs. Optional target_name to replace material on existing mesh; otherwise creates new mesh (geometry + name + position). Uniforms JSON: { uTime: { type: "float", value: 0 } }. If use_scene_environment true, adds envMap from scene. uTime auto-animates with scene time when animate_u_time is true. NEVER redeclare built-in Three.js vertex attributes or uniforms (position, uv, normal, modelViewMatrix, projectionMatrix, modelMatrix, viewMatrix, normalMatrix, cameraPosition) — they are already provided and redeclaring them causes a shader compile error.',
+        parameters: {
+          type: 'object',
+          required: ['vertex_shader', 'fragment_shader'],
+          properties: {
+            vertex_shader: { type: 'string' },
+            fragment_shader: { type: 'string' },
+            uniforms: {
+              type: 'object',
+              description:
+                'Map of uniform name to { type: float|int|vec2|vec3|vec4|color, value: number or array or hex string }',
+            },
+            target_name: {
+              type: 'string',
+              description: 'Registered object name whose first Mesh gets this material',
+            },
+            name: { type: 'string', description: 'Registry name when creating a new mesh' },
+            geometry: { type: 'string', enum: GEO_ENUM },
+            geometry_params: { type: 'array', items: { type: 'number' } },
+            position: { ...VEC3 },
+            rotation: { ...VEC3 },
+            scale: { description: 'number or [x,y,z]' },
+            use_scene_environment: { type: 'boolean' },
+            animate_u_time: { type: 'boolean', description: 'If uniforms include uTime, drive it from scene clock (default true)' },
+            side: { type: 'string', enum: ['front', 'back', 'double'] },
+            wireframe: { type: 'boolean' },
+            cast_shadow: { type: 'boolean' },
+          },
+        },
+      },
+    },
+  },
   list_objects: {
     execute: execListObjects,
     schema: {
@@ -475,24 +1052,204 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
       },
     },
   },
+  gen_texture: {
+    execute: execGenTexture,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'gen_texture',
+        description:
+          'Generate a physically-based GPU procedural texture (WebGL2 GLSL ES 3.0) and apply it to a named mesh or create a new display plane. ' +
+          'domain="atomic": presets orbital_density|orbital_phase|interference|radial_probability|electron_cloud (params: n,l,m,slice_z,n1,l1,m1,n2,l2,m2,mix). ' +
+          'domain="cellular": presets voronoi_membrane|reaction_diffusion|cytoskeleton|mitochondria (params: cell_scale,membrane_width,jitter,feed,kill,diffusion_a,diffusion_b,fiber_density,thickness). ' +
+          'domain="material": presets crystal_lattice|thin_film|grain_boundary|dislocation_field (params: a,b,angle,hkl_h,hkl_k,thickness_nm,n_film,n_substrate,grain_count,boundary_sharpness,dislocation_count,burgers). ' +
+          'Set animate=true to re-render the texture every frame with uTime. Use map_slot to choose which material channel to fill.',
+        parameters: {
+          type: 'object',
+          required: ['domain', 'preset'],
+          properties: {
+            domain:      { type: 'string', enum: ['atomic', 'cellular', 'material'], description: 'Physics domain.' },
+            preset:      { type: 'string', description: 'Preset name — see tool description for full list.' },
+            resolution:  { type: 'number', description: '64, 128, 256, 512 (default), 1024, 2048, or 4096. Higher resolutions with bake=true have zero per-frame cost.' },
+            bake:        { type: 'boolean', description: 'Render once at full resolution and never re-render (zero per-frame cost). Enables mipmaps. Best for static or slow-changing textures at 1024-4096px. Default false.' },
+            params:      { type: 'object', description: 'Preset-specific numeric parameters as a flat object.' },
+            animate:     { type: 'boolean', description: 'Re-render texture every frame with uTime. Default true.' },
+            target_name: { type: 'string', description: 'Apply texture to this named mesh instead of creating a new plane.' },
+            map_slot:    { type: 'string', enum: ['map','emissiveMap','normalMap','alphaMap','roughnessMap'], description: 'Material slot. Default: map.' },
+            name:        { type: 'string', description: 'Name of the new display plane (when no target_name).' },
+            position:    { type: 'array', items: { type: 'number' }, description: '[x,y,z] position of new plane.' },
+          },
+        },
+      },
+    },
+  },
+  generate_tree: {
+    execute: execGenerateTree,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'generate_tree',
+        description:
+          'Generate a botanically-accurate procedural tree using space-colonization growth, da Vinci pipe-model taper, Catmull-Rom spline branches, golden-angle phyllotactic leaf placement, and InstancedMesh foliage. ' +
+          'Much more realistic than scatter-of-cones. Each seed gives a unique tree. Stage floor is y≈-1.35.',
+        parameters: {
+          type: 'object',
+          required: ['name', 'position'],
+          properties: {
+            name:                { type: 'string' },
+            position:            { ...VEC3, description: 'Base of the trunk [x,y,z]. Floor is y≈-1.35.' },
+            seed:                { type: 'integer', description: 'Random seed for reproducible shape.' },
+            trunk_height:        { type: 'number', description: 'Trunk height before crown (default 2.5).' },
+            trunk_radius:        { type: 'number', description: 'Base trunk radius (default 0.12).' },
+            crown_size:          { ...VEC3, description: 'Ellipsoidal crown [rx, ry, rz] (default [1.8, 2, 1.8]).' },
+            crown_offset:        { ...VEC3, description: 'Shift crown center from trunk top.' },
+            attractor_count:     { type: 'integer', description: 'Space-colonization attractors (default 800). More = denser crown.' },
+            branch_step:         { type: 'number', description: 'Branch growth step size (default 0.18). Smaller = smoother.' },
+            max_iterations:      { type: 'integer', description: 'Growth iterations (default 120).' },
+            pipe_exponent:       { type: 'number', description: 'da Vinci exponent (default 2.2). 2=classical, higher=thinner sub-branches.' },
+            radial_segments:     { type: 'integer', description: 'Tube cross-section segments (default 8).' },
+            leaf_density:        { type: 'number', description: 'Leaves per terminal node (default 4).' },
+            leaf_size:           { type: 'number', description: 'Individual leaf size (default 0.12).' },
+            bark_color:          { type: 'string', description: 'Hex color for bark (default #5c3a1e).' },
+            leaf_color:          { type: 'string', description: 'Hex color for leaves (default #3a7d2e).' },
+            leaf_color_variation:{ type: 'number', description: 'Hue variation across leaves 0-0.3 (default 0.08).' },
+            wind_strength:       { type: 'number', description: '0=static, 0.4=gentle breeze (default 0.4).' },
+            tropism:             { ...VEC3, description: 'Growth bias [x,y,z]. Positive y=phototropism (default [0,0.12,0]).' },
+            scale:               { description: 'Uniform number or [x,y,z].' },
+            rotation:            { ...VEC3, description: 'Euler XYZ radians.' },
+          },
+        },
+      },
+    },
+  },
+  reset_scene: {
+    execute: execResetScene,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'reset_scene',
+        description:
+          'Remove all objects added by the scene agent (generated meshes, lights, clouds, etc.), clear animations, and empty the name registry. Does not remove the core orbital / import UI.',
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+  },
 }
 
-/** Return all tool schemas for the OpenAI tools array. */
+// ── Dynamic tool registry ───────────────────────────────────────────────────
+
+/** Dynamically-registered tools created at runtime via create_tool. */
+const DYNAMIC_TOOLS: Record<string, { execute: (ctx: ToolContext, a: Record<string, unknown>) => ToolResult; schema: object }> = {}
+
+/**
+ * create_tool executor.
+ * The agent provides:
+ *   - tool_name: snake_case identifier
+ *   - description: what the tool does
+ *   - parameters_schema: JSON Schema object for the parameters
+ *   - body: JS function body string. Receives (ctx, args, THREE) and must return { ok, message }.
+ *           ctx is ToolContext, args is the parsed arguments object, THREE is the three.js namespace.
+ */
+function execCreateTool(_ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  const toolName = String(a.tool_name ?? '').replace(/[^a-z0-9_]/gi, '_').toLowerCase()
+  if (!toolName) return { ok: false, message: 'tool_name is required' }
+  if (toolName in SCENE_TOOLS) return { ok: false, message: `Cannot override built-in tool: ${toolName}` }
+
+  const body = String(a.body ?? '')
+  if (!body) return { ok: false, message: 'body is required' }
+
+  const description = String(a.description ?? `Dynamic tool: ${toolName}`)
+  const paramsSchema = (a.parameters_schema as object | undefined) ?? { type: 'object', properties: {} }
+
+  // fn receives (ctx, args, THREE, track) where track(ctx, name, obj) registers+adds an object
+  type TrackFn = (ctx: ToolContext, name: string, obj: THREE.Object3D) => void
+  type DynFn = (ctx: ToolContext, args: Record<string, unknown>, THREE: typeof import('three'), track: TrackFn) => ToolResult
+  let fn: DynFn
+  try {
+    // eslint-disable-next-line no-new-func
+    fn = new Function('ctx', 'args', 'THREE', 'track', body) as DynFn
+  } catch (e) {
+    return { ok: false, message: `Syntax error in tool body: ${String(e)}` }
+  }
+
+  DYNAMIC_TOOLS[toolName] = {
+    execute: (c, a2) => {
+      try {
+        return fn(c, a2, THREE, track)
+      } catch (e) {
+        return { ok: false, message: `Runtime error in ${toolName}: ${String(e)}` }
+      }
+    },
+    schema: {
+      type: 'function',
+      function: {
+        name: toolName,
+        description,
+        parameters: paramsSchema,
+      },
+    },
+  }
+
+  return { ok: true, message: `Tool "${toolName}" registered. You can now call it in subsequent turns.` }
+}
+
+/** Return all tool schemas for the OpenAI tools array (built-ins + dynamic). */
 export function getToolSchemas(): object[] {
-  return Object.values(SCENE_TOOLS).map((t) => t.schema)
+  return [
+    ...Object.values(SCENE_TOOLS).map((t) => t.schema),
+    ...Object.values(DYNAMIC_TOOLS).map((t) => t.schema),
+    CREATE_TOOL_ENTRY.schema,
+  ]
 }
 
-/** Dispatch a tool call by name. */
+/** Dispatch a tool call by name (built-ins, dynamic, and create_tool itself). */
 export function dispatchTool(
   name: string,
   args: Record<string, unknown>,
   ctx: ToolContext
 ): ToolResult {
-  const tool = SCENE_TOOLS[name]
+  if (name === 'create_tool') return execCreateTool(ctx, args)
+  const tool = SCENE_TOOLS[name] ?? DYNAMIC_TOOLS[name]
   if (!tool) return { ok: false, message: `Unknown tool: ${name}` }
   try {
     return tool.execute(ctx, args)
   } catch (e) {
     return { ok: false, message: `Tool error: ${String(e)}` }
   }
+}
+
+/** Schema entry for create_tool itself (kept separate so it's always last). */
+const CREATE_TOOL_ENTRY = {
+  schema: {
+    type: 'function',
+    function: {
+      name: 'create_tool',
+      description:
+        'Define and register a brand-new tool at runtime. After registration the tool is immediately available for you to call in subsequent rounds. Use this to build reusable helpers (e.g. spawn_asteroid, add_neon_ring) that you can call many times with different args.',
+      parameters: {
+        type: 'object',
+        required: ['tool_name', 'description', 'body'],
+        properties: {
+          tool_name: {
+            type: 'string',
+            description: 'snake_case name for the new tool (e.g. "spawn_comet"). Must be unique.',
+          },
+          description: {
+            type: 'string',
+            description: 'What this tool does — shown to the model in future rounds.',
+          },
+          parameters_schema: {
+            type: 'object',
+            description:
+              'JSON Schema object describing the parameters the new tool accepts. E.g. { "type": "object", "properties": { "count": { "type": "number" } } }',
+          },
+          body: {
+            type: 'string',
+            description:
+              'JavaScript function body (NOT an arrow function — just the statements). Receives three arguments: ctx (ToolContext with .scene, .camera, .renderer, .registry, .frameFns, .added), args (parsed parameter object), THREE (the three.js namespace), track (function(ctx,name,obj) to register+add objects). Must return { ok: boolean, message: string }.',
+          },
+        },
+      },
+    },
+  },
 }

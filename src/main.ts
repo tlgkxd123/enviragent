@@ -58,9 +58,10 @@ const sceneGen = bindChatbotUi(
     renderer: orbital.renderer,
     applyEnvMap: (envMap) => orbital.applyEnvMap(envMap),
   },
-  () => (document.getElementById('chatModel') as HTMLInputElement)?.value ?? 'gpt-4o',
-  () => (document.getElementById('chatApiKey') as HTMLInputElement)?.value ?? '',
-  () => (document.getElementById('chatBaseUrl') as HTMLInputElement)?.value ?? ''
+  () => (document.getElementById('chatModel')     as HTMLInputElement)?.value ?? 'gpt-4o',
+  () => (document.getElementById('chatApiKey')    as HTMLInputElement)?.value ?? '',
+  () => (document.getElementById('chatBaseUrl')   as HTMLInputElement)?.value ?? '',
+  () => (document.getElementById('chatReasoning') as HTMLSelectElement)?.value ?? 'none'
 )
 
 const meshSelectEnabled = document.getElementById('meshSelectEnabled') as HTMLInputElement

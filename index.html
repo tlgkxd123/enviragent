@@ -225,30 +225,76 @@
         <span class="mono qr-val" id="qr-qnums">—</span>
       </div>
       <div class="qr-row">
-        <span class="qr-label">Energy</span>
-        <span class="mono qr-val" id="qr-energy">—</span>
+        <span class="qr-label">Nodes</span>
+        <span class="mono qr-val" id="qr-nodes">—</span>
       </div>
 
       <hr class="divider" />
+      <p class="section-label" style="font-size:0.65rem;margin:2px 0">Energy</p>
 
       <div class="qr-row">
-        <span class="qr-label">⟨L²⟩</span>
+        <span class="qr-label">Bohr E</span>
+        <span class="mono qr-val" id="qr-energy">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">FS + Lamb</span>
+        <span class="mono qr-val" id="qr-energy-fs">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">E total</span>
+        <span class="mono qr-val" id="qr-energy-total">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">Rel + SO</span>
+        <span class="mono qr-val" id="qr-rel">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">Ionization</span>
+        <span class="mono qr-val" id="qr-ionization">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">v/c, γ</span>
+        <span class="mono qr-val" id="qr-velocity">—</span>
+      </div>
+
+      <hr class="divider" />
+      <p class="section-label" style="font-size:0.65rem;margin:2px 0">Angular Momentum</p>
+
+      <div class="qr-row">
+        <span class="qr-label">⟨L²⟩, |L|</span>
         <span class="mono qr-val" id="qr-L2">—</span>
       </div>
       <div class="qr-row">
-        <span class="qr-label">⟨Lz⟩</span>
+        <span class="qr-label">⟨Lz⟩, gJ</span>
         <span class="mono qr-val" id="qr-Lz">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">Zeeman</span>
+        <span class="mono qr-val" id="qr-zeeman">—</span>
       </div>
 
       <hr class="divider" />
+      <p class="section-label" style="font-size:0.65rem;margin:2px 0">Position &amp; Momentum</p>
 
       <div class="qr-row">
         <span class="qr-label">⟨r⟩</span>
         <span class="mono qr-val" id="qr-r">—</span>
       </div>
       <div class="qr-row">
+        <span class="qr-label">⟨r²⟩, rmp</span>
+        <span class="mono qr-val" id="qr-r2">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">⟨1/r⟩</span>
+        <span class="mono qr-val" id="qr-invr">—</span>
+      </div>
+      <div class="qr-row">
         <span class="qr-label">Δr</span>
         <span class="mono qr-val" id="qr-dr">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">⟨T⟩, ⟨V⟩</span>
+        <span class="mono qr-val" id="qr-TV">—</span>
       </div>
       <div class="qr-row">
         <span class="qr-label">Δr·|p|</span>
@@ -256,7 +302,29 @@
       </div>
 
       <hr class="divider" />
+      <p class="section-label" style="font-size:0.65rem;margin:2px 0">Radiation &amp; Lifetime</p>
 
+      <div class="qr-row">
+        <span class="qr-label">Photon (n→1)</span>
+        <span class="mono qr-val" id="qr-photon">—</span>
+        <span id="qr-photon-swatch" style="display:none;width:12px;height:12px;border-radius:3px;margin-left:4px;vertical-align:middle;flex-shrink:0"></span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">Lifetime τ</span>
+        <span class="mono qr-val" id="qr-lifetime">—</span>
+      </div>
+      <div class="qr-row">
+        <span class="qr-label">Linewidth</span>
+        <span class="mono qr-val" id="qr-linewidth">—</span>
+      </div>
+
+      <hr class="divider" />
+      <p class="section-label" style="font-size:0.65rem;margin:2px 0">Hyperfine &amp; Degeneracy</p>
+
+      <div class="qr-row">
+        <span class="qr-label">HFS</span>
+        <span class="mono qr-val" id="qr-hfs">—</span>
+      </div>
       <div class="qr-row">
         <span class="qr-label">Degeneracy</span>
         <span class="mono qr-val" id="qr-degen">—</span>
@@ -266,7 +334,7 @@
         <span class="mono qr-val" id="qr-transition">—</span>
       </div>
 
-      <p class="tiny gizmo-hint">Atomic units: ℏ = m_e = e = a₀ = 1. Selection rules: Δℓ = ±1, Δm = 0,±1.</p>
+      <p class="tiny gizmo-hint">CODATA 2022. Atomic units: ℏ=m_e=e=a₀=1. FS=fine structure. SO=spin-orbit. HFS=hyperfine. Δℓ=±1, Δm=0,±1.</p>
     </aside>
       </div><!-- /tab-quantum -->
 
@@ -286,6 +354,15 @@
           <label class="chat-config-label mono" for="chatModel">Model</label>
           <input type="text" id="chatModel" class="mono chat-config-input" value="gpt-4o" />
         </div>
+        <div class="chat-config-row">
+          <label class="chat-config-label mono" for="chatReasoning">Reasoning</label>
+          <select id="chatReasoning" class="mono chat-config-input">
+            <option value="none">none (default)</option>
+            <option value="low">low</option>
+            <option value="medium">medium</option>
+            <option value="high">high</option>
+          </select>
+        </div>
       </div>
       <div class="chat-log" id="chatLog"></div>
       <div class="chat-input-row">
@@ -294,7 +371,10 @@
         <button type="button" class="btn chat-send" id="chatSend">Send</button>
       </div>
       <div class="chat-footer-row">
-        <span class="mono tiny" id="chatStatus">—</span>
+        <span class="mono tiny chat-footer-status">
+          <span id="chatStatus">—</span>
+          <span id="chatSseBadge" class="chat-sse-badge" hidden title="Receiving SSE (text/event-stream)">SSE</span>
+        </span>
         <button type="button" class="btn btn--ghost chat-clear" id="chatClear">Clear scene</button>
       </div>
     </aside>

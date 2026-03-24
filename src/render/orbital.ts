@@ -136,7 +136,7 @@ export function createOrbitalScene(canvas: HTMLCanvasElement): OrbitalScene {
   const scene = new Scene()
   scene.background = new Color(0x040506)
 
-  const camera = new PerspectiveCamera(40, 1, 0.05, 220)
+  const camera = new PerspectiveCamera(40, 1, 0.001, 1e7)
   camera.position.set(3.2, 1.45, 3.6)
 
   const renderer = new WebGLRenderer({
@@ -179,8 +179,10 @@ export function createOrbitalScene(canvas: HTMLCanvasElement): OrbitalScene {
   const controls = new OrbitControls(camera, canvas)
   controls.enableDamping = true
   controls.dampingFactor = 0.06
-  controls.minDistance = 1.4
-  controls.maxDistance = 28
+  /* Infinite zoom: minDistance near zero, maxDistance unbounded */
+  controls.minDistance = 0.0005
+  controls.maxDistance = 1e6
+  controls.zoomSpeed = 1.2
   controls.target.set(0, 0.15, 0)
 
   const { composer, atomHalftoneUniforms, ssrSetSize, lensFlare } = createOrbitalComposer(renderer, scene, camera)
@@ -476,6 +478,12 @@ export function createOrbitalScene(canvas: HTMLCanvasElement): OrbitalScene {
   function step(dt: number) {
     liquid.step(dt)
     updateSelectionHelper()
+    // Dynamic near/far: keeps clipping planes proportional to camera distance
+    // so the scene renders correctly at any zoom level (infinite zoom support)
+    const dist = camera.position.distanceTo(controls.target)
+    camera.near = Math.max(0.0001, dist * 0.0001)
+    camera.far  = Math.max(1e5, dist * 1e4)
+    camera.updateProjectionMatrix()
   }
 
   setLiquidOptions(liquidOptions)
