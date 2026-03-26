@@ -70,7 +70,36 @@ export function bindChatbotUi(
   const frameFns: Array<(dt: number, t: number) => void> = []
   const added: THREE.Object3D[] = []
 
-  const toolCtx: ToolContext = { ...ctx, registry, frameFns, added }
+  const captureFrame = (): string | null => {
+    try {
+      for (const fn of frameFns) {
+        try { fn(0.016, performance.now() * 0.001) } catch { /* skip */ }
+      }
+
+      const prevTarget = ctx.renderer.getRenderTarget()
+      ctx.renderer.setRenderTarget(null)
+      ctx.renderer.render(ctx.scene, ctx.camera)
+      ctx.renderer.setRenderTarget(prevTarget)
+
+      const canvas = ctx.renderer.domElement
+      const maxDim = 768
+      const scale = Math.min(maxDim / canvas.width, maxDim / canvas.height, 1)
+      const w = Math.round(canvas.width * scale)
+      const h = Math.round(canvas.height * scale)
+
+      const off = document.createElement('canvas')
+      off.width = w
+      off.height = h
+      const octx = off.getContext('2d')
+      if (!octx) return null
+      octx.drawImage(canvas, 0, 0, w, h)
+      return off.toDataURL('image/jpeg', 0.55)
+    } catch {
+      return null
+    }
+  }
+
+  const toolCtx: ToolContext = { ...ctx, registry, frameFns, added, captureFrame }
 
   let abortCtrl: AbortController | null = null
   let running = false
@@ -359,6 +388,18 @@ export function bindChatbotUi(
     updateAssistantStreamBubble()
   }
 
+  function appendScreenshot(dataUrl: string) {
+    const wrap = document.createElement('div')
+    wrap.className = 'chat-screenshot'
+    const img = document.createElement('img')
+    img.src = dataUrl
+    img.className = 'chat-screenshot__img'
+    img.alt = 'Scene screenshot'
+    wrap.appendChild(img)
+    chatLog.appendChild(wrap)
+    scrollBottom()
+  }
+
   function appendToolEntry(name: string, ok: boolean, message: string) {
     const wrap = document.createElement('div')
     wrap.className = 'chat-tool'
@@ -446,6 +487,7 @@ export function bindChatbotUi(
         onAssistantReasoningDelta: appendAssistantReasoningDelta,
         onAssistantToolPreviewDelta: appendAssistantToolPreviewDelta,
         onToolCall(name, _args, result) { appendToolEntry(name, result.ok, result.message) },
+        onScreenshot(dataUrl) { appendScreenshot(dataUrl) },
         onStatus(msg) { setStatus(msg) },
         onDone() {
           running = false

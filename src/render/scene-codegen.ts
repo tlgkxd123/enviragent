@@ -35,7 +35,7 @@ export interface GeneratedScene {
   dispose: () => void
 }
 
-const SYSTEM_PROMPT = `You are a creative Three.js scene programmer for a quantum physics renderer.
+const SYSTEM_PROMPT = `You are a creative Three.js scene programmer for a 3D environment renderer.
 Respond with ONLY a JavaScript function body (no function keyword, no markdown fences, no imports).
 The code runs inside: new Function('THREE', 'api', <your code>)
 

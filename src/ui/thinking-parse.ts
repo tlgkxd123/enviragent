@@ -1,6 +1,8 @@
 /** Markers for chain-of-thought (case-insensitive; optional spaces before `>`). */
-const OPEN_RE = /<thinking\s*>/i
-const CLOSE_RE = /<\/thinking\s*>/i
+// NOTE: Do NOT use module-level regex with lastIndex — without the `g` flag lastIndex is ignored
+// and exec() always starts from 0, causing an infinite loop. Create fresh instances per call.
+function makeOpenRe()  { return /<thinking\s*>/i }
+function makeCloseRe() { return /<\/thinking\s*>/i }
 
 function stripPartialOpenSuffix(s: string): string {
   const openLower = '<thinking>'
@@ -46,17 +48,16 @@ export function parseThinkingDisplay(raw: string): ThinkingSplit {
   let i = 0
 
   while (i < raw.length) {
-    OPEN_RE.lastIndex = i
-    const om = OPEN_RE.exec(raw)
+    // Create a fresh regex each iteration — module-level regex without `g` ignores lastIndex
+    const om = makeOpenRe().exec(raw.slice(i))
     if (!om) {
       visible += stripPartialOpenSuffix(raw.slice(i))
       break
     }
-    visible += raw.slice(i, om.index)
-    const innerStart = om.index + om[0].length
+    visible += raw.slice(i, i + om.index)
+    const innerStart = i + om.index + om[0].length
 
-    CLOSE_RE.lastIndex = innerStart
-    const cm = CLOSE_RE.exec(raw)
+    const cm = makeCloseRe().exec(raw.slice(innerStart))
 
     if (!cm) {
       let inner = raw.slice(innerStart)
@@ -65,9 +66,9 @@ export function parseThinkingDisplay(raw: string): ThinkingSplit {
       return { visible, thinking, inThinking: true }
     }
 
-    const block = raw.slice(innerStart, cm.index)
+    const block = raw.slice(innerStart, innerStart + cm.index)
     thinking += (thinking ? '\n\n' : '') + block
-    i = cm.index + cm[0].length
+    i = innerStart + cm.index + cm[0].length
   }
 
   return { visible, thinking, inThinking: false }

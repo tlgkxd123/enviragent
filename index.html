@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Subatomic renderer</title>
+    <title>3D Environment Agent</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -14,83 +14,19 @@
   </head>
   <body>
     <div class="grain" aria-hidden="true"></div>
-    <canvas id="canvas" aria-label="Hydrogen orbital visualization"></canvas>
+    <canvas id="canvas" aria-label="3D environment visualization"></canvas>
 
     <header class="panel panel--header">
-      <p class="eyebrow">Wavefunction laboratory</p>
-      <h1 class="title">Subatomic renderer</h1>
+      <p class="eyebrow">3D Environment Studio</p>
+      <h1 class="title">Scene Agent</h1>
       <p class="lede">
-        Analytic hydrogen ψ<sub>nℓm</sub> on a spherical shell: radial factor at
-        <span class="mono">r ∝ n²</span> a.u., hue encodes phase, relief encodes |ψ|².
+        Build and explore 3D environments with AI-driven scene generation,
+        volumetric clouds, PBR materials, and procedural content.
       </p>
     </header>
 
     <aside class="panel panel--controls">
-      <div class="field">
-        <label for="n">Principal <span class="mono">n</span></label>
-        <select id="n" class="mono"></select>
-      </div>
-      <div class="field">
-        <label for="l">Azimuthal <span class="mono">ℓ</span></label>
-        <select id="l" class="mono"></select>
-      </div>
-      <div class="field">
-        <label for="m">Magnetic <span class="mono">m</span></label>
-        <select id="m" class="mono"></select>
-      </div>
-      <div class="readout mono" id="labelPrimary">—</div>
-
-      <hr class="divider" />
-
-      <div class="field field--row">
-        <label class="checkbox">
-          <input type="checkbox" id="superposition" />
-          <span>Superposition</span>
-        </label>
-      </div>
-      <div class="field">
-        <label for="n2">Secondary <span class="mono">n</span></label>
-        <select id="n2" class="mono" disabled></select>
-      </div>
-      <div class="field">
-        <label for="l2">Secondary <span class="mono">ℓ</span></label>
-        <select id="l2" class="mono" disabled></select>
-      </div>
-      <div class="field">
-        <label for="m2">Secondary <span class="mono">m</span></label>
-        <select id="m2" class="mono" disabled></select>
-      </div>
-      <div class="field">
-        <label for="mix">Mix weight (secondary)</label>
-        <input type="range" id="mix" min="0" max="100" value="35" disabled />
-        <span class="mono tiny" id="mixVal">0.35</span>
-      </div>
-      <div class="readout mono" id="labelSecondary">—</div>
-
-      <hr class="divider" />
-
-      <div class="field field--row">
-        <label class="checkbox">
-          <input type="checkbox" id="evolve" />
-          <span>Time evolution</span>
-        </label>
-      </div>
-      <div class="field">
-        <label for="time">Time <span class="mono">t</span> (a.u.)</label>
-        <input type="range" id="time" min="0" max="1000" value="0" disabled />
-        <span class="mono tiny" id="timeVal">0.00</span>
-      </div>
-
-      <hr class="divider" />
-
-      <p class="section-label">Import &amp; particles</p>
-      <div class="field">
-        <label for="viewMode">Visualization</label>
-        <select id="viewMode" class="mono">
-          <option value="orbital" selected>Hydrogen orbital</option>
-          <option value="model">Custom mesh (OBJ / FBX)</option>
-        </select>
-      </div>
+      <p class="section-label">Import &amp; models</p>
       <div class="field field--files">
         <label class="file-pill">
           <input type="file" id="fileObj" accept=".obj,.OBJ" hidden />
@@ -105,7 +41,7 @@
       <button type="button" class="btn btn--ghost" id="proceduralModel">
         Generate radiolarian shell
       </button>
-      <div class="readout mono" id="modelStatus">Use Custom mesh, load a file, or generate.</div>
+      <div class="readout mono" id="modelStatus">Load a model or use the Scene AI to build.</div>
 
       <div class="field field--row">
         <label class="checkbox">
@@ -131,11 +67,11 @@
       <div class="field field--row">
         <label class="checkbox">
           <input type="checkbox" id="atomHalftoneEnabled" />
-          <span>Atomic halftone</span>
+          <span>Halftone effect</span>
         </label>
       </div>
       <div class="field">
-        <label for="atomCellSize">Atom size (px)</label>
+        <label for="atomCellSize">Dot size (px)</label>
         <input type="range" id="atomCellSize" min="2" max="24" step="1" value="8" />
         <span class="mono tiny" id="atomCellSizeVal">8</span>
       </div>
@@ -172,9 +108,8 @@
       <div class="field">
         <label for="gizmoTarget">Target</label>
         <select id="gizmoTarget" class="mono">
-          <option value="orbital" selected>Orbital sphere</option>
+          <option value="selected" selected>Selected mesh</option>
           <option value="import" disabled>Imported model</option>
-          <option value="selected">Selected mesh</option>
         </select>
       </div>
       <p class="tiny gizmo-hint">
@@ -207,138 +142,11 @@
 
     <div class="panel panel--secondary">
       <nav class="tab-bar" role="tablist">
-        <button class="tab-btn tab-btn--active" role="tab" data-tab="quantum" aria-selected="true">Observables</button>
-        <button class="tab-btn" role="tab" data-tab="chat" aria-selected="false">Scene AI</button>
+        <button class="tab-btn tab-btn--active" role="tab" data-tab="chat" aria-selected="true">Scene AI</button>
         <button class="tab-btn" role="tab" data-tab="envgen" aria-selected="false">Environment</button>
       </nav>
 
-      <div class="tab-panel tab-panel--active" id="tab-quantum">
-      <aside class="panel panel--quantum" aria-label="Quantum observables">
-      <p class="section-label">Quantum observables</p>
-
-      <div class="qr-row">
-        <span class="qr-label">State</span>
-        <span class="mono qr-val" id="qr-state">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">Quantum #s</span>
-        <span class="mono qr-val" id="qr-qnums">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">Nodes</span>
-        <span class="mono qr-val" id="qr-nodes">—</span>
-      </div>
-
-      <hr class="divider" />
-      <p class="section-label" style="font-size:0.65rem;margin:2px 0">Energy</p>
-
-      <div class="qr-row">
-        <span class="qr-label">Bohr E</span>
-        <span class="mono qr-val" id="qr-energy">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">FS + Lamb</span>
-        <span class="mono qr-val" id="qr-energy-fs">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">E total</span>
-        <span class="mono qr-val" id="qr-energy-total">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">Rel + SO</span>
-        <span class="mono qr-val" id="qr-rel">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">Ionization</span>
-        <span class="mono qr-val" id="qr-ionization">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">v/c, γ</span>
-        <span class="mono qr-val" id="qr-velocity">—</span>
-      </div>
-
-      <hr class="divider" />
-      <p class="section-label" style="font-size:0.65rem;margin:2px 0">Angular Momentum</p>
-
-      <div class="qr-row">
-        <span class="qr-label">⟨L²⟩, |L|</span>
-        <span class="mono qr-val" id="qr-L2">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">⟨Lz⟩, gJ</span>
-        <span class="mono qr-val" id="qr-Lz">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">Zeeman</span>
-        <span class="mono qr-val" id="qr-zeeman">—</span>
-      </div>
-
-      <hr class="divider" />
-      <p class="section-label" style="font-size:0.65rem;margin:2px 0">Position &amp; Momentum</p>
-
-      <div class="qr-row">
-        <span class="qr-label">⟨r⟩</span>
-        <span class="mono qr-val" id="qr-r">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">⟨r²⟩, rmp</span>
-        <span class="mono qr-val" id="qr-r2">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">⟨1/r⟩</span>
-        <span class="mono qr-val" id="qr-invr">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">Δr</span>
-        <span class="mono qr-val" id="qr-dr">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">⟨T⟩, ⟨V⟩</span>
-        <span class="mono qr-val" id="qr-TV">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">Δr·|p|</span>
-        <span class="mono qr-val" id="qr-hup">—</span>
-      </div>
-
-      <hr class="divider" />
-      <p class="section-label" style="font-size:0.65rem;margin:2px 0">Radiation &amp; Lifetime</p>
-
-      <div class="qr-row">
-        <span class="qr-label">Photon (n→1)</span>
-        <span class="mono qr-val" id="qr-photon">—</span>
-        <span id="qr-photon-swatch" style="display:none;width:12px;height:12px;border-radius:3px;margin-left:4px;vertical-align:middle;flex-shrink:0"></span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">Lifetime τ</span>
-        <span class="mono qr-val" id="qr-lifetime">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">Linewidth</span>
-        <span class="mono qr-val" id="qr-linewidth">—</span>
-      </div>
-
-      <hr class="divider" />
-      <p class="section-label" style="font-size:0.65rem;margin:2px 0">Hyperfine &amp; Degeneracy</p>
-
-      <div class="qr-row">
-        <span class="qr-label">HFS</span>
-        <span class="mono qr-val" id="qr-hfs">—</span>
-      </div>
-      <div class="qr-row">
-        <span class="qr-label">Degeneracy</span>
-        <span class="mono qr-val" id="qr-degen">—</span>
-      </div>
-      <div class="qr-row" id="qr-transition-row" style="display:none">
-        <span class="qr-label">Transition</span>
-        <span class="mono qr-val" id="qr-transition">—</span>
-      </div>
-
-      <p class="tiny gizmo-hint">CODATA 2022. Atomic units: ℏ=m_e=e=a₀=1. FS=fine structure. SO=spin-orbit. HFS=hyperfine. Δℓ=±1, Δm=0,±1.</p>
-    </aside>
-      </div><!-- /tab-quantum -->
-
-      <div class="tab-panel" id="tab-chat">
+      <div class="tab-panel tab-panel--active" id="tab-chat">
     <aside class="panel panel--chat" aria-label="Scene AI chat">
       <p class="section-label">Scene AI <span class="chat-badge">agent</span></p>
       <div class="chat-config">
@@ -413,18 +221,8 @@
     </div><!-- /panel--secondary -->
 
     <footer class="panel panel--footer mono tiny">
-      <div class="legend">
-        <div
-          class="legend__strip"
-          role="img"
-          aria-label="Hue encodes phase from 0 to 2π around the spectrum"
-        ></div>
-        <p class="legend__cap">Hue = arg ψ · relief = |ψ|²</p>
-      </div>
       <div class="footer-meta">
-        <span id="energyReadout">E = —</span>
-        <span class="sep">|</span>
-        <span>ℏ = m_e = e = a₀ = 1</span>
+        <span>3D Environment Agent · Three.js + AI scene builder</span>
       </div>
     </footer>
 

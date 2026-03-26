@@ -12,8 +12,16 @@ import {
   createScatterGroup,
   createTerrainGeometry,
 } from './procedural-objects'
+import type { TerrainOptions, NoiseSphereOptions } from './procedural-objects'
 import { generateTree } from './procedural-tree'
 import type { TreeOptions } from './procedural-tree'
+import { createFFTWater } from './fft-water'
+import type { WaterOptions } from './fft-water'
+import { createLandscape } from './terrain'
+import type { LandscapeOptions } from './terrain'
+import { Sky } from 'three/addons/objects/Sky.js'
+import { createCurlSwarm } from './curl-swarm'
+import type { CurlSwarmOptions } from './curl-swarm'
 
 /**
  * Tool definitions + executors for the agentic scene builder.
@@ -29,6 +37,8 @@ export interface ToolContext {
   registry: Map<string, THREE.Object3D>
   frameFns: Array<(dt: number, t: number) => void>
   added: THREE.Object3D[]
+  /** Renders the current frame and returns a data-URL screenshot (JPEG). */
+  captureFrame?: () => string | null
 }
 
 export interface ToolResult {
@@ -40,6 +50,29 @@ function track(ctx: ToolContext, name: string, obj: THREE.Object3D): void {
   ctx.scene.add(obj)
   ctx.added.push(obj)
   if (name) ctx.registry.set(name, obj)
+}
+
+// ── Singleton removal (auto-replace previous water/terrain) ─────────────────
+
+type FrameFn = (dt: number, t: number) => void
+const _singletons: Record<string, { name: string; updateFn: FrameFn | null }> = {}
+
+function removePrevious(ctx: ToolContext, tag: string) {
+  const prev = _singletons[tag]
+  if (!prev) return
+  const obj = ctx.registry.get(prev.name)
+  if (obj) {
+    ctx.scene.remove(obj)
+    disposeObjectResources(obj)
+    ctx.registry.delete(prev.name)
+    const idx = ctx.added.indexOf(obj)
+    if (idx >= 0) ctx.added.splice(idx, 1)
+  }
+  if (prev.updateFn) {
+    const fi = ctx.frameFns.indexOf(prev.updateFn)
+    if (fi >= 0) ctx.frameFns.splice(fi, 1)
+  }
+  delete _singletons[tag]
 }
 
 // ── Executors ────────────────────────────────────────────────────────────────
@@ -97,11 +130,24 @@ function execAddProceduralMesh(ctx: ToolContext, a: Record<string, unknown>): To
     case 'terrain': {
       const w = Number(a.terrain_width ?? 14)
       const d = Number(a.terrain_depth ?? 14)
-      const sx = Math.min(128, Math.max(8, Math.floor(Number(a.terrain_segments_x ?? 48))))
-      const sz = Math.min(128, Math.max(8, Math.floor(Number(a.terrain_segments_z ?? 48))))
+      const sx = Math.min(256, Math.max(8, Math.floor(Number(a.terrain_segments_x ?? 64))))
+      const sz = Math.min(256, Math.max(8, Math.floor(Number(a.terrain_segments_z ?? 64))))
       const h = Number(a.height_scale ?? 1.8)
-      const geo = createTerrainGeometry(w, d, sx, sz, h, seed)
-      root = new THREE.Mesh(geo, mat())
+      const tOpts: TerrainOptions = {
+        fbmOctaves:       a.fbm_octaves != null ? Number(a.fbm_octaves) : undefined,
+        fbmLacunarity:    a.fbm_lacunarity != null ? Number(a.fbm_lacunarity) : undefined,
+        fbmGain:          a.fbm_gain != null ? Number(a.fbm_gain) : undefined,
+        warpStrength:     a.warp_strength != null ? Number(a.warp_strength) : undefined,
+        ridged:           a.ridged != null ? Boolean(a.ridged) : undefined,
+        erosionEnabled:   a.erosion_enabled != null ? Boolean(a.erosion_enabled) : true,
+        erosionIterations:a.erosion_iterations != null ? Number(a.erosion_iterations) : 30000,
+        thermalIterations:a.thermal_iterations != null ? Number(a.thermal_iterations) : undefined,
+        talusAngle:       a.talus_angle != null ? Number(a.talus_angle) : undefined,
+      }
+      const geo = createTerrainGeometry(w, d, sx, sz, h, seed, tOpts)
+      const m = mat()
+      m.vertexColors = true
+      root = new THREE.Mesh(geo, m)
       break
     }
     case 'noise_sphere': {
@@ -109,7 +155,14 @@ function execAddProceduralMesh(ctx: ToolContext, a: Record<string, unknown>): To
       const ws = Math.min(256, Math.max(16, Math.floor(Number(a.width_segments ?? 48))))
       const hs = Math.min(256, Math.max(16, Math.floor(Number(a.height_segments ?? 48))))
       const disp = Number(a.displacement ?? 0.35)
-      const geo = createNoiseSphereGeometry(r, ws, hs, disp, seed)
+      const nsOpts: NoiseSphereOptions = {
+        fbmOctaves:    a.fbm_octaves != null ? Number(a.fbm_octaves) : undefined,
+        fbmLacunarity: a.fbm_lacunarity != null ? Number(a.fbm_lacunarity) : undefined,
+        fbmGain:       a.fbm_gain != null ? Number(a.fbm_gain) : undefined,
+        warpStrength:  a.warp_strength != null ? Number(a.warp_strength) : undefined,
+        ridged:        a.ridged != null ? Boolean(a.ridged) : undefined,
+      }
+      const geo = createNoiseSphereGeometry(r, ws, hs, disp, seed, nsOpts)
       root = new THREE.Mesh(geo, mat())
       break
     }
@@ -257,6 +310,41 @@ function execAddParticles(ctx: ToolContext, a: Record<string, unknown>): ToolRes
   return { ok: true, message: `Particle system "${a.name}" with ${N} particles added.` }
 }
 
+function execAddCurlSwarm(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  const name = String(a.name ?? 'swarm')
+  const pos = (a.position as number[]) ?? [0, 0, 0]
+  const rot = a.rotation as number[] | undefined
+  const sc = a.scale
+
+  const opts: CurlSwarmOptions = {
+    count: Number(a.count ?? 10000),
+    radius: Number(a.radius ?? 5.0),
+    color1: a.color1 ? new THREE.Color(String(a.color1)).getHex() : undefined,
+    color2: a.color2 ? new THREE.Color(String(a.color2)).getHex() : undefined,
+    sizeMin: Number(a.size_min ?? 0.02),
+    sizeMax: Number(a.size_max ?? 0.08),
+    speed: Number(a.speed ?? 0.2),
+    scale: Number(a.scale_noise ?? 0.5),
+    swirl: Number(a.swirl ?? 1.5),
+  }
+
+  const swarm = createCurlSwarm(opts)
+  swarm.position.set(pos[0], pos[1], pos[2])
+  if (rot) swarm.rotation.set(rot[0], rot[1], rot[2])
+  if (sc != null) {
+    if (Array.isArray(sc)) swarm.scale.set(sc[0], sc[1], sc[2])
+    else swarm.scale.setScalar(Number(sc))
+  }
+
+  track(ctx, name, swarm)
+  
+  if (swarm.userData.update) {
+    ctx.frameFns.push(swarm.userData.update)
+  }
+
+  return { ok: true, message: `Added Curl Noise Swarm '${name}' with ${opts.count} particles.` }
+}
+
 function execAnimate(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
   const name = String(a.name ?? '')
   const obj  = ctx.registry.get(name)
@@ -323,6 +411,59 @@ function execSetEnvironment(ctx: ToolContext, a: Record<string, unknown>): ToolR
 function execSetBackground(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
   ctx.scene.background = new THREE.Color(String(a.color ?? '#040506'))
   return { ok: true, message: `Background set to ${a.color}.` }
+}
+
+function execAddSky(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  removePrevious(ctx, 'sky')
+
+  const name = String(a.name ?? 'sky')
+  const elevation = Number(a.sun_elevation ?? 45)
+  const azimuth   = Number(a.sun_azimuth ?? 180)
+  const turbidity  = Number(a.turbidity ?? 2)
+  const rayleigh   = Number(a.rayleigh ?? 1)
+  const mieCoeff   = Number(a.mie_coefficient ?? 0.005)
+  const mieDir     = Number(a.mie_directional_g ?? 0.8)
+  const skyScale   = Number(a.scale ?? 1000)
+
+  const sky = new Sky()
+  sky.scale.setScalar(skyScale)
+
+  const skyUniforms = sky.material.uniforms
+  skyUniforms['turbidity'].value = turbidity
+  skyUniforms['rayleigh'].value = rayleigh
+  skyUniforms['mieCoefficient'].value = mieCoeff
+  skyUniforms['mieDirectionalG'].value = mieDir
+
+  const phi = THREE.MathUtils.degToRad(90 - elevation)
+  const theta = THREE.MathUtils.degToRad(azimuth)
+  const sunPos = new THREE.Vector3().setFromSphericalCoords(1, phi, theta)
+  skyUniforms['sunPosition'].value.copy(sunPos)
+
+  track(ctx, name, sky)
+  _singletons['sky'] = { name, updateFn: null }
+
+  // Update directional lights in the scene to match sun direction
+  const sunWorldPos = sunPos.clone().multiplyScalar(100)
+  ctx.scene.traverse((child) => {
+    if (child instanceof THREE.DirectionalLight) {
+      child.position.copy(sunWorldPos)
+    }
+  })
+
+  // Generate PMREM environment map from the sky for reflections
+  const pmrem = new THREE.PMREMGenerator(ctx.renderer)
+  pmrem.compileCubemapShader()
+  const renderTarget = pmrem.fromScene(sky as unknown as THREE.Scene)
+  ctx.applyEnvMap(renderTarget.texture)
+  ctx.scene.background = renderTarget.texture
+  pmrem.dispose()
+
+  const elStr = elevation.toFixed(1)
+  const azStr = azimuth.toFixed(1)
+  return {
+    ok: true,
+    message: `Sky "${name}" added (sun elevation ${elStr}°, azimuth ${azStr}°, turbidity ${turbidity}, rayleigh ${rayleigh}). Environment map + background updated for reflections.`,
+  }
 }
 
 function execListObjects(ctx: ToolContext, _a: Record<string, unknown>): ToolResult {
@@ -404,6 +545,154 @@ function execGenerateTree(ctx: ToolContext, a: Record<string, unknown>): ToolRes
   }
 }
 
+// ── Edge-midpoint subdivision (preserves shared edges) ───────────────────────
+
+function subdivideGeometry(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+  let src = geo
+  if (!src.index) {
+    const n = src.attributes.position.count
+    const trivIdx = new Uint32Array(n)
+    for (let i = 0; i < n; i++) trivIdx[i] = i
+    src = src.clone()
+    src.setIndex(new THREE.BufferAttribute(trivIdx, 1))
+  }
+
+  const oldPos = (src.attributes.position as THREE.BufferAttribute).array as Float32Array
+  const oldUv = src.attributes.uv
+    ? (src.attributes.uv as THREE.BufferAttribute).array as Float32Array : undefined
+  const oldCol = src.attributes.color
+    ? (src.attributes.color as THREE.BufferAttribute).array as Float32Array : undefined
+  const colSize = src.attributes.color ? (src.attributes.color as THREE.BufferAttribute).itemSize : 3
+  const indices = src.index!.array as Uint16Array | Uint32Array
+  const nV = src.attributes.position.count
+  const nTri = indices.length / 3
+
+  const edgeMid = new Map<number, number>()
+  let next = nV
+  function mid(a: number, b: number): number {
+    const key = Math.min(a, b) * 1000000 + Math.max(a, b)
+    let m = edgeMid.get(key)
+    if (m === undefined) { m = next++; edgeMid.set(key, m) }
+    return m
+  }
+  for (let t = 0; t < nTri; t++) {
+    const i0 = indices[t * 3], i1 = indices[t * 3 + 1], i2 = indices[t * 3 + 2]
+    mid(i0, i1); mid(i1, i2); mid(i2, i0)
+  }
+
+  const totV = next
+  const newPos = new Float32Array(totV * 3)
+  newPos.set(oldPos.subarray(0, nV * 3))
+  let newUv: Float32Array | undefined
+  if (oldUv) { newUv = new Float32Array(totV * 2); newUv.set(oldUv.subarray(0, nV * 2)) }
+  let newCol: Float32Array | undefined
+  if (oldCol) { newCol = new Float32Array(totV * colSize); newCol.set(oldCol.subarray(0, nV * colSize)) }
+
+  for (const [key, mi] of edgeMid) {
+    const a = Math.floor(key / 1000000), b = key % 1000000
+    newPos[mi * 3]     = (oldPos[a * 3]     + oldPos[b * 3])     / 2
+    newPos[mi * 3 + 1] = (oldPos[a * 3 + 1] + oldPos[b * 3 + 1]) / 2
+    newPos[mi * 3 + 2] = (oldPos[a * 3 + 2] + oldPos[b * 3 + 2]) / 2
+    if (newUv && oldUv) {
+      newUv[mi * 2]     = (oldUv[a * 2]     + oldUv[b * 2])     / 2
+      newUv[mi * 2 + 1] = (oldUv[a * 2 + 1] + oldUv[b * 2 + 1]) / 2
+    }
+    if (newCol && oldCol) {
+      for (let c = 0; c < colSize; c++)
+        newCol[mi * colSize + c] = (oldCol[a * colSize + c] + oldCol[b * colSize + c]) / 2
+    }
+  }
+
+  const newIdx = new Uint32Array(nTri * 4 * 3)
+  let ii = 0
+  for (let t = 0; t < nTri; t++) {
+    const v0 = indices[t * 3], v1 = indices[t * 3 + 1], v2 = indices[t * 3 + 2]
+    const m01 = mid(v0, v1), m12 = mid(v1, v2), m20 = mid(v2, v0)
+    newIdx[ii++] = v0;  newIdx[ii++] = m01; newIdx[ii++] = m20
+    newIdx[ii++] = m01; newIdx[ii++] = v1;  newIdx[ii++] = m12
+    newIdx[ii++] = m20; newIdx[ii++] = m12; newIdx[ii++] = v2
+    newIdx[ii++] = m01; newIdx[ii++] = m12; newIdx[ii++] = m20
+  }
+
+  const out = new THREE.BufferGeometry()
+  out.setAttribute('position', new THREE.BufferAttribute(newPos, 3))
+  if (newUv) out.setAttribute('uv', new THREE.BufferAttribute(newUv, 2))
+  if (newCol) out.setAttribute('color', new THREE.BufferAttribute(newCol, colSize))
+  out.setIndex(new THREE.BufferAttribute(newIdx, 1))
+  out.computeVertexNormals()
+  return out
+}
+
+function execTessellateMesh(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  const name = String(a.name ?? '')
+  const obj = ctx.registry.get(name)
+  if (!obj) return { ok: false, message: `Object "${name}" not found.` }
+  const levels = Math.min(4, Math.max(1, Number(a.levels ?? 1)))
+  let mesh: THREE.Mesh | undefined
+  obj.traverse((c) => { if (c instanceof THREE.Mesh && !mesh) mesh = c })
+  if (!mesh) return { ok: false, message: `No mesh found under "${name}".` }
+  const before = mesh.geometry.attributes.position.count
+  let geo = mesh.geometry
+  for (let i = 0; i < levels; i++) geo = subdivideGeometry(geo)
+  mesh.geometry.dispose()
+  mesh.geometry = geo
+  return { ok: true, message: `Tessellated "${name}" ×${levels}: ${before} → ${geo.attributes.position.count} vertices (${(geo.index?.count ?? 0) / 3} triangles).` }
+}
+
+function execAddWater(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  removePrevious(ctx, 'water')
+  const name = String(a.name ?? 'water')
+  const pos = (a.position as number[]) ?? [0, -1.35, 0]
+  const wopts: WaterOptions = {
+    size: (a.size as [number, number]) ?? [40, 40],
+    resolution: a.resolution != null ? Number(a.resolution) : undefined,
+    color: a.color ? new THREE.Color(String(a.color)).getHex() : undefined,
+    wave_scale: a.wave_scale != null ? Number(a.wave_scale) : undefined,
+    choppiness: a.choppiness != null ? Number(a.choppiness) : undefined,
+    wave_count: a.wave_count != null ? Number(a.wave_count) : undefined,
+    speed: a.speed != null ? Number(a.speed) : undefined,
+    foam: a.foam != null ? Boolean(a.foam) : undefined,
+    seed: a.seed != null ? Number(a.seed) : undefined,
+    opacity: a.opacity != null ? Number(a.opacity) : undefined,
+  }
+  const handle = createFFTWater(wopts)
+  handle.mesh.position.set(pos[0], pos[1], pos[2])
+  track(ctx, name, handle.mesh)
+  ctx.frameFns.push(handle.update)
+  _singletons['water'] = { name, updateFn: handle.update }
+  const sz = wopts.size ?? [40, 40]
+  const r = wopts.resolution ?? 128
+  return { ok: true, message: `3D ocean "${name}" added (${sz[0]}×${sz[1]}, ${r}×${r} vertices, ${wopts.wave_count ?? 12} Gerstner waves, choppiness ${wopts.choppiness ?? 0.8}, foam ${wopts.foam !== false ? 'on' : 'off'}).` }
+}
+
+function execAddTerrain(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
+  removePrevious(ctx, 'terrain')
+  const name = String(a.name ?? 'terrain')
+  const pos = (a.position as number[]) ?? [0, -2, 0]
+  const lopts: LandscapeOptions = {
+    size: (a.size as [number, number]) ?? undefined,
+    resolution: a.resolution != null ? Number(a.resolution) : undefined,
+    biome: a.biome != null ? String(a.biome) : undefined,
+    height_scale: a.height_scale != null ? Number(a.height_scale) : undefined,
+    seed: a.seed != null ? Number(a.seed) : undefined,
+    octaves: a.octaves != null ? Number(a.octaves) : undefined,
+    persistence: a.persistence != null ? Number(a.persistence) : undefined,
+    lacunarity: a.lacunarity != null ? Number(a.lacunarity) : undefined,
+    ridge_fraction: a.ridge_fraction != null ? Number(a.ridge_fraction) : undefined,
+    snow_line: a.snow_line != null ? Number(a.snow_line) : undefined,
+    tree_line: a.tree_line != null ? Number(a.tree_line) : undefined,
+    tex_scale: a.tex_scale != null ? Number(a.tex_scale) : undefined,
+  }
+  const handle = createLandscape(lopts)
+  handle.mesh.position.set(pos[0], pos[1], pos[2])
+  track(ctx, name, handle.mesh)
+  _singletons['terrain'] = { name, updateFn: null }
+  const biome = lopts.biome ?? 'mountains'
+  const sz = lopts.size ?? [40, 40]
+  const r = lopts.resolution ?? 128
+  return { ok: true, message: `Landscape "${name}" added (${sz[0]}×${sz[1]}, ${r}×${r} vertices, biome="${biome}", height ${handle.heightMin.toFixed(1)}→${handle.heightMax.toFixed(1)}, textured with grass/rock/dirt/snow blended by height+slope).` }
+}
+
 function execResetScene(ctx: ToolContext, _a: Record<string, unknown>): ToolResult {
   const n = ctx.added.length
   for (const obj of [...ctx.added]) {
@@ -415,12 +704,13 @@ function execResetScene(ctx: ToolContext, _a: Record<string, unknown>): ToolResu
   ctx.registry.clear()
   for (const h of _proceduralTextures) h.dispose()
   _proceduralTextures.clear()
+  for (const k of Object.keys(_singletons)) delete _singletons[k]
   return { ok: true, message: n ? `Scene reset: removed ${n} top-level object(s).` : 'Scene was already empty.' }
 }
 
 function execGenTexture(ctx: ToolContext, a: Record<string, unknown>): ToolResult {
-  const domain = String(a.domain ?? 'atomic') as 'atomic' | 'cellular' | 'material'
-  const preset = String(a.preset ?? 'orbital_density')
+  const domain = String(a.domain ?? 'cellular') as 'cellular' | 'material' | 'surface'
+  const preset = String(a.preset ?? 'voronoi_membrane')
   const resolution = Math.min(4096, Math.max(64, Number(a.resolution ?? 512)))
   const params = (a.params ?? {}) as Record<string, number>
   const bake = Boolean(a.bake ?? false)
@@ -453,25 +743,69 @@ function execGenTexture(ctx: ToolContext, a: Record<string, unknown>): ToolResul
       (mat as unknown as Record<string, unknown>)[mapSlot] = tex
       mat.needsUpdate = true
     }
+    const appliedMaps: string[] = [mapSlot]
+    if (domain === 'surface' && mat) {
+      if (handle.normalMap) {
+        mat.normalMap = handle.normalMap
+        handle.normalMap.colorSpace = THREE.LinearSRGBColorSpace
+        mat.normalScale = new THREE.Vector2(1, 1)
+        appliedMaps.push('normalMap')
+      }
+      if (handle.ormMap) {
+        handle.ormMap.colorSpace = THREE.LinearSRGBColorSpace
+        mat.aoMap = handle.ormMap
+        mat.roughnessMap = handle.ormMap
+        mat.metalnessMap = handle.ormMap
+        mat.roughness = 1.0
+        mat.metalness = 1.0
+        appliedMaps.push('aoMap', 'roughnessMap', 'metalnessMap')
+      }
+      if (handle.emissiveMap) {
+        mat.emissiveMap = handle.emissiveMap
+        mat.emissive = new THREE.Color(1, 1, 1)
+        mat.emissiveIntensity = 1.0
+        appliedMaps.push('emissiveMap')
+      }
+      mat.needsUpdate = true
+    }
     if (animate) ctx.frameFns.push((_dt, t) => handle.updateTime(t))
-    return { ok: true, message: `Procedural texture (${domain}/${preset} @${resolution}px) applied to "${targetName}" [${mapSlot}].` }
+    return { ok: true, message: `Procedural texture (${domain}/${preset} @${resolution}px) applied to "${targetName}" [${appliedMaps.join(', ')}].` }
   }
 
   // No target — create a new display plane
   const name = String(a.name ?? `tex_${preset}`)
   const geo  = new THREE.PlaneGeometry(2, 2)
-  const mat  = new THREE.MeshStandardMaterial({ [mapSlot]: tex, side: THREE.DoubleSide })
+  const planeMat = new THREE.MeshStandardMaterial({ [mapSlot]: tex, side: THREE.DoubleSide })
   if (mapSlot === 'emissiveMap') {
-    (mat as THREE.MeshStandardMaterial).emissive = new THREE.Color(1, 1, 1)
-    ;(mat as THREE.MeshStandardMaterial).emissiveIntensity = 1
+    planeMat.emissive = new THREE.Color(1, 1, 1)
+    planeMat.emissiveIntensity = 1
   }
-  const mesh = new THREE.Mesh(geo, mat)
+  if (domain === 'surface') {
+    if (handle.normalMap) {
+      planeMat.normalMap = handle.normalMap
+      handle.normalMap.colorSpace = THREE.LinearSRGBColorSpace
+    }
+    if (handle.ormMap) {
+      handle.ormMap.colorSpace = THREE.LinearSRGBColorSpace
+      planeMat.aoMap = handle.ormMap
+      planeMat.roughnessMap = handle.ormMap
+      planeMat.metalnessMap = handle.ormMap
+      planeMat.roughness = 1.0
+      planeMat.metalness = 1.0
+    }
+    if (handle.emissiveMap) {
+      planeMat.emissiveMap = handle.emissiveMap
+      planeMat.emissive = new THREE.Color(1, 1, 1)
+      planeMat.emissiveIntensity = 1.0
+    }
+  }
+  const mesh = new THREE.Mesh(geo, planeMat)
   const pos = (a.position as number[]) ?? [0, 1.5, 0]
   mesh.position.set(pos[0] ?? 0, pos[1] ?? 1.5, pos[2] ?? 0)
   track(ctx, name, mesh)
 
   if (animate) ctx.frameFns.push((_dt, t) => handle.updateTime(t))
-  return { ok: true, message: `Procedural texture plane "${name}" created (${domain}/${preset} @${resolution}px, animate=${animate}).` }
+  return { ok: true, message: `Procedural texture plane "${name}" created (${domain}/${preset} @${resolution}px${domain === 'surface' ? ', full PBR maps' : ''}, animate=${animate}).` }
 }
 
 function makeDataTexture(
@@ -747,7 +1081,7 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
       function: {
         name: 'add_procedural_mesh',
         description:
-          'Create geometry procedurally at runtime (seeded): terrain heightmap, displaced noise sphere, scattered primitives, crystal clusters, or rock fields. Prefer this for forests, landscapes, asteroid fields, organic blobs.',
+          'Advanced procedural geometry (seeded). terrain=domain-warped FBM + hydraulic/thermal erosion + slope-based vertex colors; noise_sphere=3D ridged multi-fractal + domain warping; scatter=Poisson-disk blue-noise + InstancedMesh; crystal_cluster=hex prisms + Voronoi competition; rock_field=3D-noise icosahedra + Laplacian erosion + Poisson placement.',
         parameters: {
           type: 'object',
           required: ['name', 'preset', 'position'],
@@ -757,7 +1091,7 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
               type: 'string',
               enum: ['terrain', 'noise_sphere', 'scatter', 'crystal_cluster', 'rock_field'],
               description:
-                'terrain=heightmap ground; noise_sphere=organic blob; scatter=many small meshes; crystal_cluster=cones; rock_field=icosahedron rocks',
+                'terrain=eroded heightmap; noise_sphere=ridged organic blob; scatter=Poisson-distributed meshes; crystal_cluster=hex prism growth; rock_field=eroded rocks',
             },
             seed: { type: 'integer', description: 'Random seed for reproducible variation' },
             position: { ...VEC3 },
@@ -768,15 +1102,29 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
             roughness: { type: 'number', minimum: 0, maximum: 1 },
             wireframe: { type: 'boolean' },
             cast_shadow: { type: 'boolean' },
+            // Terrain params
             terrain_width: { type: 'number' },
             terrain_depth: { type: 'number' },
-            terrain_segments_x: { type: 'integer' },
-            terrain_segments_z: { type: 'integer' },
-            height_scale: { type: 'number', description: 'Max vertical displacement for terrain' },
+            terrain_segments_x: { type: 'integer', description: 'Grid resolution X (max 256, default 64)' },
+            terrain_segments_z: { type: 'integer', description: 'Grid resolution Z (max 256, default 64)' },
+            height_scale: { type: 'number', description: 'Max vertical displacement' },
+            // Advanced noise params (terrain + noise_sphere)
+            fbm_octaves: { type: 'integer', description: 'Noise octaves 1-8 (default 6 terrain, 5 sphere)' },
+            fbm_lacunarity: { type: 'number', description: 'Frequency multiplier per octave (default 2.0)' },
+            fbm_gain: { type: 'number', description: 'Amplitude multiplier per octave (default 0.5)' },
+            warp_strength: { type: 'number', description: 'Domain warping 0-2 (default 0.4 terrain, 0.5 sphere)' },
+            ridged: { type: 'boolean', description: 'Use ridged multi-fractal for sharp ridges/veins' },
+            // Erosion params (terrain)
+            erosion_enabled: { type: 'boolean', description: 'Run hydraulic erosion simulation (default true)' },
+            erosion_iterations: { type: 'integer', description: 'Erosion droplet count (default 30000, max 200000)' },
+            thermal_iterations: { type: 'integer', description: 'Thermal weathering passes (0=disabled)' },
+            talus_angle: { type: 'number', description: 'Talus angle in radians for thermal erosion (default 0.65)' },
+            // Noise sphere params
             radius: { type: 'number', description: 'Base radius for noise_sphere' },
             width_segments: { type: 'integer' },
             height_segments: { type: 'integer' },
             displacement: { type: 'number', description: 'Surface noise strength for noise_sphere' },
+            // Scatter params
             scatter_geometry: {
               type: 'string',
               enum: ['sphere', 'box', 'cone', 'tetrahedron', 'octahedron'],
@@ -864,6 +1212,34 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
             size:             { type: 'number', description: 'Point size in world units' },
             opacity:          { type: 'number', minimum: 0, maximum: 1 },
             flatten_y:        { type: 'number', description: 'Y-axis flattening factor, 1=sphere, 0.2=disc' },
+          },
+        },
+      },
+    },
+  },
+  add_curl_swarm: {
+    execute: execAddCurlSwarm,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'add_curl_swarm',
+        description: 'Add an advanced GPU-based Curl Noise Particle Swarm. Uses analytical curl noise in the vertex shader to advect instanced geometry for fluid-like swirling motions.',
+        parameters: {
+          type: 'object',
+          properties: {
+            name:       { type: 'string' },
+            count:      { type: 'number', description: 'Number of particles, e.g. 10000 to 50000' },
+            radius:     { type: 'number', description: 'Spawn radius' },
+            color1:     { type: 'string', description: 'CSS hex color 1' },
+            color2:     { type: 'string', description: 'CSS hex color 2' },
+            size_min:   { type: 'number' },
+            size_max:   { type: 'number' },
+            speed:      { type: 'number', description: 'Speed of noise evolution' },
+            scale_noise:{ type: 'number', description: 'Scale of the curl noise' },
+            swirl:      { type: 'number', description: 'Intensity of the curl displacement' },
+            position:   { ...VEC3 },
+            rotation:   { ...VEC3 },
+            scale:      { type: ['number', 'array'], items: { type: 'number' } },
           },
         },
       },
@@ -1060,15 +1436,17 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
         name: 'gen_texture',
         description:
           'Generate a physically-based GPU procedural texture (WebGL2 GLSL ES 3.0) and apply it to a named mesh or create a new display plane. ' +
-          'domain="atomic": presets orbital_density|orbital_phase|interference|radial_probability|electron_cloud (params: n,l,m,slice_z,n1,l1,m1,n2,l2,m2,mix). ' +
-          'domain="cellular": presets voronoi_membrane|reaction_diffusion|cytoskeleton|mitochondria (params: cell_scale,membrane_width,jitter,feed,kill,diffusion_a,diffusion_b,fiber_density,thickness). ' +
-          'domain="material": presets crystal_lattice|thin_film|grain_boundary|dislocation_field (params: a,b,angle,hkl_h,hkl_k,thickness_nm,n_film,n_substrate,grain_count,boundary_sharpness,dislocation_count,burgers). ' +
-          'Set animate=true to re-render the texture every frame with uTime. Use map_slot to choose which material channel to fill.',
+          'domain="cellular": presets voronoi_membrane|reaction_diffusion|cytoskeleton|mitochondria. ' +
+          'domain="material": presets crystal_lattice|thin_film|grain_boundary|dislocation_field. ' +
+          'domain="surface": HYPERREAL PBR materials — auto-generates albedo + analytical normal map + ORM (AO/Roughness/Metalness) maps from a single preset. ' +
+          'Presets: weathered_metal (params: scale,scratch_density,grime) | marble (scale,vein_intensity,vein_freq,color_temp) | rough_stone (scale,crack_depth,weathering,mineral_variation) | aged_wood (scale,ring_freq,grain_strength,age) | rust_iron (scale,corrosion,pitting,clean_patches) | cracked_earth (scale,crack_width,dryness,dust_color) | concrete (scale,aggregate,crack_density,staining) | lava (scale,crack_glow,coolness,flow_speed; also generates emissive map). ' +
+          'Surface textures use gradient noise with analytical derivatives for perfect normal maps, multi-layer composition (scratches+pitting+grime, veins+zones, etc.), and Voronoi crack networks. Default bake=true (zero per-frame cost). ' +
+          'Set animate=true to re-render the texture every frame with uTime. Use map_slot to choose which material channel to fill (surface domain auto-applies all PBR maps regardless).',
         parameters: {
           type: 'object',
           required: ['domain', 'preset'],
           properties: {
-            domain:      { type: 'string', enum: ['atomic', 'cellular', 'material'], description: 'Physics domain.' },
+            domain:      { type: 'string', enum: ['cellular', 'material', 'surface'], description: 'Texture domain. Use "surface" for hyperreal PBR materials (auto-generates normal+roughness+AO+metalness maps).' },
             preset:      { type: 'string', description: 'Preset name — see tool description for full list.' },
             resolution:  { type: 'number', description: '64, 128, 256, 512 (default), 1024, 2048, or 4096. Higher resolutions with bake=true have zero per-frame cost.' },
             bake:        { type: 'boolean', description: 'Render once at full resolution and never re-render (zero per-frame cost). Enables mipmaps. Best for static or slow-changing textures at 1024-4096px. Default false.' },
@@ -1122,6 +1500,119 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
       },
     },
   },
+  tessellate_mesh: {
+    execute: execTessellateMesh,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'tessellate_mesh',
+        description:
+          'Subdivide a named mesh into higher resolution geometry using edge-midpoint tessellation. ' +
+          'Each level quadruples the triangle count. Preserves UVs, vertex colors, and shared edges. ' +
+          'Useful before applying displacement maps, procedural deformation, or for smoother silhouettes.',
+        parameters: {
+          type: 'object',
+          required: ['name'],
+          properties: {
+            name: { type: 'string', description: 'Name of the mesh to tessellate.' },
+            levels: { type: 'number', description: 'Subdivision levels (1-4, default 1). Each level ×4 triangles.' },
+          },
+        },
+      },
+    },
+  },
+  add_water: {
+    execute: execAddWater,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'add_water',
+        description:
+          'Add a 3D ocean mesh with real Gerstner wave vertex displacement. ' +
+          'Vertices move every frame — sharp crests, wide troughs, foam from Jacobian whitecaps. ' +
+          'MeshPhysicalMaterial with transmission/IOR 1.33 for translucent water. Default y=-1.35 (stage floor). ' +
+          'Tune wave_scale (amplitude), choppiness (horizontal pull 0-1.5), wave_count (complexity 3-32), resolution (mesh detail 32-512).',
+        parameters: {
+          type: 'object',
+          properties: {
+            name:        { type: 'string', description: 'Name for the water object (default "water").' },
+            size:        { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2, description: 'World [width, depth] (default [40,40]).' },
+            position:    { ...VEC3, description: 'World position [x,y,z] (default [0,-1.35,0]).' },
+            resolution:  { type: 'number', description: 'Mesh grid resolution per axis (default 128, max 512). Higher = smoother waves but more CPU.' },
+            color:       { type: 'string', description: 'Water body color hex (default "#006994").' },
+            wave_scale:  { type: 'number', description: 'Wave amplitude (default 0.4). Higher = taller waves.' },
+            choppiness:  { type: 'number', description: 'Gerstner horizontal displacement factor 0-1.5 (default 0.8). Higher = sharper crests.' },
+            wave_count:  { type: 'number', description: 'Number of overlapping wave components 3-32 (default 12). More = richer detail.' },
+            speed:       { type: 'number', description: 'Wave animation speed multiplier (default 1.0).' },
+            foam:        { type: 'boolean', description: 'Enable Jacobian-based foam/whitecap vertex colors (default true).' },
+            seed:        { type: 'number', description: 'Random seed for wave directions (default 42).' },
+            opacity:     { type: 'number', description: 'Water opacity 0-1 (default 0.85).' },
+          },
+        },
+      },
+    },
+  },
+  add_terrain: {
+    execute: execAddTerrain,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'add_terrain',
+        description:
+          'Add a 3D landscape mesh with procedural heightmap and multi-texture material. ' +
+          'Uses multi-octave gradient noise + ridged noise for realistic terrain. ' +
+          'Custom shader blends 4 photo textures (grass/rock/dirt/snow) based on height band and surface steepness. ' +
+          'Biome presets: mountains, rolling_hills, desert, arctic, volcanic, canyon, plateau. ' +
+          'Auto-removes previous terrain when called again. Default y=-2.',
+        parameters: {
+          type: 'object',
+          properties: {
+            name:           { type: 'string', description: 'Name for the terrain object (default "terrain").' },
+            size:           { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2, description: 'World [width, depth] (default [40,40]).' },
+            position:       { ...VEC3, description: 'World position [x,y,z] (default [0,-2,0]).' },
+            resolution:     { type: 'number', description: 'Mesh grid resolution per axis (default 128, max 512).' },
+            biome:          { type: 'string', description: 'Biome preset: mountains, rolling_hills, desert, arctic, volcanic, canyon, plateau (default "mountains").' },
+            height_scale:   { type: 'number', description: 'Vertical height multiplier (default depends on biome, ~6-10 for mountains).' },
+            seed:           { type: 'number', description: 'Random seed for heightmap (default 42).' },
+            octaves:        { type: 'number', description: 'Noise octaves 1-10 (default ~7). More = finer detail.' },
+            persistence:    { type: 'number', description: 'Noise persistence/gain 0-1 (default ~0.48). Higher = rougher.' },
+            ridge_fraction: { type: 'number', description: 'Blend between smooth FBM and ridged noise 0-1 (default ~0.4). Higher = sharper ridges/peaks.' },
+            snow_line:      { type: 'number', description: 'Normalized height 0-1 where snow starts (default ~0.75).' },
+            tree_line:      { type: 'number', description: 'Normalized height 0-1 where grass→rock transition (default ~0.45).' },
+            tex_scale:      { type: 'number', description: 'Texture tiling density (default 0.25). Higher = finer texture repeat.' },
+          },
+        },
+      },
+    },
+  },
+  add_sky: {
+    execute: execAddSky,
+    schema: {
+      type: 'function',
+      function: {
+        name: 'add_sky',
+        description:
+          'Add a physically-based atmospheric sky using Preetham scattering model. ' +
+          'Creates a sky dome, positions the sun, and generates an environment map for reflections on all objects. ' +
+          'Also sets the scene background to the sky. Auto-removes previous sky. ' +
+          'Use sun_elevation (0°=horizon, 90°=zenith) and sun_azimuth (0°=north, 180°=south) to position the sun. ' +
+          'For golden hour use elevation ~5-15. For noon use ~60-90. For sunset use ~1-5.',
+        parameters: {
+          type: 'object',
+          properties: {
+            name:              { type: 'string', description: 'Name for the sky object (default "sky").' },
+            sun_elevation:     { type: 'number', description: 'Sun elevation angle in degrees (default 45). 0=horizon, 90=directly overhead.' },
+            sun_azimuth:       { type: 'number', description: 'Sun azimuth angle in degrees (default 180). 0=north, 90=east, 180=south, 270=west.' },
+            turbidity:         { type: 'number', description: 'Atmospheric turbidity 1-20 (default 2). Higher = hazier, more yellow/orange sky.' },
+            rayleigh:          { type: 'number', description: 'Rayleigh scattering coefficient (default 1). Higher = bluer sky.' },
+            mie_coefficient:   { type: 'number', description: 'Mie scattering coefficient (default 0.005). Higher = more glow around sun.' },
+            mie_directional_g: { type: 'number', description: 'Mie scattering directionality 0-1 (default 0.8). Higher = tighter sun glow.' },
+            scale:             { type: 'number', description: 'Sky dome scale (default 1000).' },
+          },
+        },
+      },
+    },
+  },
   reset_scene: {
     execute: execResetScene,
     schema: {
@@ -1129,7 +1620,7 @@ export const SCENE_TOOLS: Record<string, SceneTool> = {
       function: {
         name: 'reset_scene',
         description:
-          'Remove all objects added by the scene agent (generated meshes, lights, clouds, etc.), clear animations, and empty the name registry. Does not remove the core orbital / import UI.',
+          'Remove all objects added by the scene agent (generated meshes, lights, clouds, etc.), clear animations, and empty the name registry.',
         parameters: { type: 'object', properties: {} },
       },
     },

@@ -42,15 +42,21 @@ interface ToolCallDef {
   function: { name: string; arguments: string }
 }
 
+interface ContentPart {
+  type: string
+  text?: string
+  image_url?: { url: string; detail?: string }
+}
+
 interface ApiMessage {
   role: string
-  content: string | null
+  content: string | null | ContentPart[]
   tool_calls?: ToolCallDef[] | unknown[]
   tool_call_id?: string
   name?: string
 }
 
-const SYSTEM = `You are an expert Three.js scene artist building a live 3D quantum physics visualization.
+const SYSTEM = `You are an expert Three.js scene artist building a live 3D environment.
 You MUST use the provided tools to add meshes, lights, volumetric clouds, particle systems, animate objects,
 set the camera, and change the environment. Do not describe a scene in words only — always call tools to
 actually build it. Build incrementally with multiple tool calls when useful.
@@ -58,10 +64,16 @@ The stage floor mesh top surface is near y ≈ -1.35; place trees, rocks, and pr
 For clouds: prefer moderate density and coverage so they stay wispy — extreme values look like a solid white blob under bloom/post-processing.
 Use add_procedural_mesh for dynamic content: terrain heightmaps, organic noise spheres, scattered props (forests of primitives), crystal clusters, rock fields — vary the seed for different layouts.
 Use exec_threejs_code for arbitrary Three.js when other tools are not enough (custom BufferGeometry, curves, helpers).
-Use gen_texture to apply physically-based GPU procedural textures: domain=atomic (orbital_density, orbital_phase, interference, radial_probability, electron_cloud), domain=cellular (voronoi_membrane, reaction_diffusion, cytoskeleton, mitochondria), domain=material (crystal_lattice, thin_film, grain_boundary, dislocation_field). Set animate=true for live animation. Apply to mesh via target_name+map_slot, or omit to create a display plane.
+Use gen_texture to apply physically-based GPU procedural textures: domain=cellular (voronoi_membrane, reaction_diffusion, cytoskeleton, mitochondria), domain=material (crystal_lattice, thin_film, grain_boundary, dislocation_field). Set animate=true for live animation. Apply to mesh via target_name+map_slot, or omit to create a display plane.
+For hyperreal surface materials use domain="surface" — this auto-generates albedo + analytical normal map + ORM (AO, Roughness, Metalness) maps from a single preset. Presets: weathered_metal, marble, rough_stone, aged_wood, rust_iron, cracked_earth, concrete, lava. These use multi-layer gradient noise with analytical derivatives for photorealistic results. Prefer bake=true and resolution 1024-2048 for best quality at zero per-frame cost.
 Use gen_shader_code for custom GLSL ES 3.0 materials (GLSL3: out fragColor, in/out varyings); pass uniforms as JSON with type/value. IMPORTANT: Never redeclare Three.js built-in vertex attributes/uniforms (position, uv, normal, modelViewMatrix, projectionMatrix, modelMatrix, viewMatrix, normalMatrix, cameraPosition) — they are already injected by Three.js and redeclaring them causes a GLSL compile error.
+Use add_water for 3D ocean with real Gerstner wave vertex displacement — vertices move every frame creating sharp crests, wide troughs, and Jacobian-based foam whitecaps. MeshPhysicalMaterial with transmission/IOR 1.33. Default at y=-1.35 (floor). Tune wave_scale (amplitude), choppiness (horizontal pull 0-1.5), wave_count (3-32), resolution (mesh grid 32-512), speed, color, opacity. Auto-removes previous water.
+Use add_terrain for procedural landscape with multi-octave noise heightmap + 4-texture shader (grass/rock/dirt/snow blended by height band + slope steepness). Biome presets: mountains, rolling_hills, desert, arctic, volcanic, canyon, plateau. Tune height_scale, seed, octaves, ridge_fraction, snow_line, tree_line. Auto-removes previous terrain.
+Use add_sky for physically-based atmospheric sky (Preetham scattering). Sets sun position via sun_elevation (0°=horizon, 90°=zenith) and sun_azimuth, creates sky dome, and generates environment map for reflections on all objects. Tune turbidity (haze), rayleigh (blue intensity). Golden hour: elevation 5-15°. Auto-removes previous sky.
+Use tessellate_mesh to subdivide any named mesh into higher-resolution geometry (edge-midpoint subdivision, 1-4 levels, each level ×4 triangles). Useful before displacement, for smoother silhouettes, or for adding geometric detail.
 Use reset_scene to wipe all AI-generated content and start over.
 Use create_tool to define reusable custom tools (e.g. spawn_asteroid, add_neon_ring) that accept parameters — then call them multiple times. The body receives (ctx, args, THREE, track); use track(ctx, name, obj) to add objects to the scene.
+After each round of tool calls, you will automatically receive a screenshot of the current 3D scene. Use this visual feedback to verify what you built and make corrections if anything looks off — wrong placement, missing objects, clipping, or color issues.
 After calling tools, briefly describe what you created in plain text. Be creative and cinematic.
 You may put private step-by-step planning in <thinking>...</thinking> XML tags; the UI shows that in a Thinking panel and omits it from API history. Write the user-facing summary outside those tags.
 Do not ask clarifying questions — just build based on the description. Call list_objects if you
@@ -199,14 +211,22 @@ function routeSseChunkToDelta(
   const choices = obj.choices as Array<Record<string, unknown>> | undefined
   const choice = choices?.[0]
   if (!choice) return null
+  const msg = choice.message as Record<string, unknown> | undefined
   let delta = choice.delta as Record<string, unknown> | undefined
   if (!delta || Object.keys(delta).length === 0) {
-    const msg = choice.message as Record<string, unknown> | undefined
     if (msg && typeof msg.content === 'string' && msg.content.length > 0) {
       delta = { content: msg.content }
     }
   }
   if (delta && Object.keys(delta).length > 0) return delta
+  // Some endpoints (Ollama, LM Studio, proxies) put the full message in choice.message
+  // instead of streaming deltas — including tool_calls. Promote it to a delta.
+  if (msg) {
+    const promoted: Record<string, unknown> = {}
+    if (typeof msg.content === 'string' && msg.content.length > 0) promoted.content = msg.content
+    if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) promoted.tool_calls = msg.tool_calls
+    if (Object.keys(promoted).length > 0) return promoted
+  }
   return null
 }
 
@@ -352,6 +372,8 @@ export async function runSceneAgent(
     /** Live partial tool-call preview during SSE when the model streams function arguments first. */
     onAssistantToolPreviewDelta?: (preview: string) => void
     onToolCall: (name: string, args: Record<string, unknown>, result: ToolResult) => void
+    /** Called when an auto-screenshot is captured after a tool round. */
+    onScreenshot?: (dataUrl: string) => void
     onStatus: (msg: string) => void
     onDone: () => void
     signal?: AbortSignal
@@ -440,7 +462,8 @@ export async function runSceneAgent(
         headers,
         callbacks.signal
       )
-      const t = msg.content ?? ''
+      const raw = msg.content
+      const t = typeof raw === 'string' ? raw : ''
       if (t) callbacks.onAssistantDelta?.(t)
       callbacks.onAssistantStreamEnd?.()
       return normalizeAssistantMessage(msg)
@@ -525,6 +548,24 @@ export async function runSceneAgent(
         content: `The following tools are now registered and available: ${newlyCreatedToolNames.join(', ')}. Call them now to build the scene — do not describe what you will do, just call the tools.`,
       })
       forceRequiredNextRound = true
+    }
+
+    // Auto-screenshot: capture current scene and inject as vision message
+    if (ctx.captureFrame) {
+      try {
+        callbacks.onStatus('Capturing scene screenshot…')
+        const dataUrl = ctx.captureFrame()
+        if (dataUrl) {
+          history.push({
+            role: 'user',
+            content: [
+              { type: 'image_url', image_url: { url: dataUrl, detail: 'low' } },
+              { type: 'text', text: '[Auto-screenshot of the scene after your tool calls. Use this to verify and refine your work.]' },
+            ],
+          })
+          callbacks.onScreenshot?.(dataUrl)
+        }
+      } catch { /* screenshot failed — continue without it */ }
     }
   }
 

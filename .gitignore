@@ -29,10 +29,10 @@ dist/
 dist-ssr/
 *.local
 
-.cursor/
-.cursor/hooks/
-.cursor/hooks/state/
-.cursor/hooks/state/continual-learning.json
-.cursor/hooks/state/continual-learning-index.json
-.cursor/hooks/state/continual-learning-index.jsonl
-.cursor/hooks/state/continual-learning-index.jsonl
+#.cursor/
+#.cursor/hooks/
+#.cursor/hooks/state/
+#.cursor/hooks/state/continual-learning.json
+#.cursor/hooks/state/continual-learning-index.json
+#.cursor/hooks/state/continual-learning-index.jsonl
+#.cursor/hooks/state/continual-learning-index.jsonl

@@ -3,9 +3,6 @@ import { createOrbitalScene } from './render/orbital'
 import { bindDisplayUi } from './ui/display-bindings'
 import { bindGizmoUi } from './ui/gizmo-bindings'
 import { bindLiquidUi } from './ui/liquid-bindings'
-import { bindModelUi } from './ui/model-bindings'
-import { bindUi } from './ui/bindings'
-import { updateQuantumReadout } from './ui/quantum-readout'
 import { bindEnvGenUi } from './ui/env-gen-bindings'
 import { bindChatbotUi } from './ui/chatbot-bindings'
 import { projectDirToScreenUv } from './render/lens-flare-pass'
@@ -26,21 +23,6 @@ function resize() {
 }
 resize()
 window.addEventListener('resize', resize)
-
-bindUi((state) => {
-  orbital.updateOrbital(
-    state.primary,
-    state.secondary,
-    state.mix,
-    state.evolve,
-    state.time
-  )
-  updateQuantumReadout(
-    state.primary,
-    state.secondary,
-    state.secondary !== null
-  )
-})
 
 const gizmoUi = bindGizmoUi(orbital)
 bindDisplayUi(orbital)
@@ -75,16 +57,6 @@ canvas.addEventListener('pointerdown', (e) => {
   orbital.selectMeshAt(e.clientX, e.clientY)
 })
 
-bindModelUi((m) => {
-  orbital.setVisualizationMode(m.viewMode)
-  orbital.setImportedVisuals({
-    showMesh: m.showImportedMesh,
-    particles: m.particlesEnabled,
-    particleCount: m.particleCount,
-  })
-  orbital.syncImportedWavefunction()
-})
-
 document.getElementById('fileObj')?.addEventListener('change', async (e) => {
   const input = e.target as HTMLInputElement
   const f = input.files?.[0]
@@ -113,9 +85,6 @@ document.getElementById('clearModel')?.addEventListener('click', () => {
 document.getElementById('proceduralModel')?.addEventListener('click', async () => {
   await orbital.loadProceduralRadiolarian()
   gizmoUi.syncImportOption()
-  const viewMode = document.getElementById('viewMode') as HTMLSelectElement
-  viewMode.value = 'model'
-  viewMode.dispatchEvent(new Event('change'))
 })
 
 const resetCam = document.getElementById('resetCam') as HTMLButtonElement
@@ -132,18 +101,16 @@ function animate(ts: number) {
   const dt = (ts - lastTs) * 0.001
   lastTs = ts
   totalTime += dt
-  orbital.material.uniforms.uTime.value = ts * 0.001
   orbital.step(dt)
   orbital.controls.update()
   sceneGen.step(dt, totalTime)
 
-  // Project key light to screen UV and feed to lens flare pass
   const uv = projectDirToScreenUv(_keyLightDir, orbital.camera)
   if (uv) {
     orbital.lensFlare.setLightScreenUv(uv.x, uv.y)
     orbital.lensFlare.setIntensity(0.88)
   } else {
-    orbital.lensFlare.setIntensity(0) // light behind camera — hide flare
+    orbital.lensFlare.setIntensity(0)
   }
 
   orbital.composer.render()

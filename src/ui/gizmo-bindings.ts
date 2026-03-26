@@ -3,14 +3,14 @@ import type {
   TransformGizmoTarget,
 } from '../render/orbital'
 
-interface OrbitalGizmoApi {
+interface GizmoApi {
   setTransformGizmoVisible: (visible: boolean) => void
   setTransformGizmoTarget: (target: TransformGizmoTarget) => void
   setTransformGizmoMode: (mode: TransformGizmoMode) => void
   hasImportedModel: () => boolean
 }
 
-export function bindGizmoUi(orbital: OrbitalGizmoApi) {
+export function bindGizmoUi(orbital: GizmoApi) {
   const enabled = document.getElementById('gizmoEnabled') as HTMLInputElement
   const mode = document.getElementById('gizmoMode') as HTMLSelectElement
   const target = document.getElementById('gizmoTarget') as HTMLSelectElement
@@ -19,8 +19,8 @@ export function bindGizmoUi(orbital: OrbitalGizmoApi) {
   function syncImportOption() {
     importOpt.disabled = !orbital.hasImportedModel()
     if (importOpt.disabled && target.value === 'import') {
-      target.value = 'orbital'
-      orbital.setTransformGizmoTarget('orbital')
+      target.value = 'selected'
+      orbital.setTransformGizmoTarget('selected')
     }
   }
 

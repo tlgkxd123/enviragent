@@ -7,12 +7,12 @@ import * as THREE from 'three'
  * Reaction-diffusion (Gray-Scott) uses ping-pong double-buffer iteration.
  *
  * Domains:
- *   atomic   — quantum wavefunction density / phase / interference
  *   cellular — voronoi membranes, reaction-diffusion, cytoskeleton, mitochondria
  *   material — crystal lattice, thin-film, grain boundary, dislocation field
+ *   surface  — PBR map stacks (albedo + normal + ORM) from presets
  */
 
-export type TextureDomain = 'atomic' | 'cellular' | 'material'
+export type TextureDomain = 'cellular' | 'material' | 'surface'
 
 export interface ProceduralTextureOpts {
   domain: TextureDomain
@@ -27,6 +27,9 @@ export interface ProceduralTextureOpts {
 
 export interface ProceduralTextureHandle {
   texture: THREE.Texture
+  normalMap?: THREE.Texture
+  ormMap?: THREE.Texture
+  emissiveMap?: THREE.Texture
   dispose: () => void
   updateTime: (t: number) => void
 }
@@ -78,140 +81,6 @@ vec3 wavelengthToRGB(float nm){
   if(nm<420.) f=0.3+0.7*(nm-380.)/40.;
   else if(nm>700.) f=0.3+0.7*(780.-nm)/80.;
   return pow(vec3(r,g,b)*f,vec3(0.8));
-}
-`
-
-const GLSL_HYDROGEN = /* glsl */`
-float fact(int n){float r=1.;for(int i=2;i<=12;i++){if(i>n)break;r*=float(i);}return r;}
-float laguerre(int n,float alpha,float x){
-  float s=0.;
-  for(int j=0;j<=8;j++){
-    if(j>n)break;
-    float bin=fact(n+int(alpha))/(fact(n-j)*fact(int(alpha)+j)*fact(j));
-    s+=(mod(float(j),2.)==0.?1.:-1.)*bin*pow(x,float(j));
-  }
-  return s;
-}
-float R_nl(int n,int l,float r){
-  float rho=2.*r/float(n);
-  float norm=sqrt(pow(2./float(n),3.)*fact(n-l-1)/(2.*float(n)*pow(fact(n+l),3.)));
-  return norm*exp(-rho*.5)*pow(rho,float(l))*laguerre(n-l-1,float(2*l+1),rho);
-}
-float P_lm(int l,int m,float x){
-  int ma=abs(m);float pmm=1.;
-  if(ma>0){float xm=sqrt(max(0.,(1.-x)*(1.+x))),f=1.;for(int i=1;i<=6;i++){if(i>ma)break;pmm*=-f*xm;f+=2.;}}
-  if(l==ma)return pmm;
-  float pmmp1=x*float(2*ma+1)*pmm;
-  if(l==ma+1)return pmmp1;
-  float pll=0.;
-  for(int ll=ma+2;ll<=6;ll++){if(ll>l)break;pll=(x*float(2*ll-1)*pmmp1-float(ll+ma-1)*pmm)/float(ll-ma);pmm=pmmp1;pmmp1=pll;}
-  return pmmp1;
-}
-float Y_real(int l,int m,float theta,float phi){
-  int ma=abs(m);
-  float norm=sqrt((float(2*l+1)/PI*4.)*fact(l-ma)/fact(l+ma));
-  float Plm=P_lm(l,m,cos(theta));
-  if(m==0)return norm*Plm;
-  if(m>0)return sqrt(2.)*norm*Plm*cos(float(ma)*phi);
-  return sqrt(2.)*norm*Plm*sin(float(ma)*phi);
-}
-float psiDensity(int n,int l,int m,float r,float theta,float phi){
-  float R=R_nl(n,l,r),Y=Y_real(l,m,theta,phi);
-  return R*R*Y*Y;
-}
-`
-
-// ══ ATOMIC ════════════════════════════════════════════════════════════════════
-
-const FRAG_ORBITAL_DENSITY = /* glsl */`precision highp float;
-${GLSL_UTIL}${GLSL_HYDROGEN}
-uniform float uTime,uN,uL,uM,uSliceZ;
-in vec2 vUv; out vec4 fragColor;
-void main(){
-  vec2 p=(vUv-.5)*24.; float z=uSliceZ*12.;
-  float r=length(vec3(p,z)); if(r<.001)r=.001;
-  float theta=acos(clamp(z/r,-1.,1.)),phi=atan(p.y,p.x);
-  float d=psiDensity(int(uN),int(uL),int(uM),r,theta,phi);
-  d=log(1.+d*900.)/log(900.);
-  float hue=fract(uL*.25+float(int(uM)+4)*.07);
-  fragColor=vec4(hsv2rgb(vec3(hue,.75,d)),1.);
-}
-`
-
-const FRAG_ORBITAL_PHASE = /* glsl */`precision highp float;
-${GLSL_UTIL}${GLSL_HYDROGEN}
-uniform float uTime,uN,uL,uM,uSliceZ;
-in vec2 vUv; out vec4 fragColor;
-void main(){
-  vec2 p=(vUv-.5)*24.; float z=uSliceZ*12.;
-  float r=length(vec3(p,z)); if(r<.001)r=.001;
-  float theta=acos(clamp(z/r,-1.,1.)),phi=atan(p.y,p.x)+uTime*.25;
-  float d=psiDensity(int(uN),int(uL),int(uM),r,theta,phi);
-  float phase=phi*uM/(2.*PI)+uTime*.12;
-  d=log(1.+d*700.)/log(700.);
-  fragColor=vec4(hsv2rgb(vec3(fract(phase),.9,d)),1.);
-}
-`
-
-const FRAG_INTERFERENCE = /* glsl */`precision highp float;
-${GLSL_UTIL}${GLSL_HYDROGEN}
-uniform float uTime,uN1,uL1,uM1,uN2,uL2,uM2,uMix,uSliceZ;
-in vec2 vUv; out vec4 fragColor;
-void main(){
-  vec2 p=(vUv-.5)*24.; float z=uSliceZ*12.;
-  float r=length(vec3(p,z)); if(r<.001)r=.001;
-  float theta=acos(clamp(z/r,-1.,1.)),phi=atan(p.y,p.x);
-  float E1=-1./(2.*uN1*uN1),E2=-1./(2.*uN2*uN2);
-  float A1=R_nl(int(uN1),int(uL1),r)*Y_real(int(uL1),int(uM1),theta,phi);
-  float A2=R_nl(int(uN2),int(uL2),r)*Y_real(int(uL2),int(uM2),theta,phi);
-  float w1=sqrt(1.-uMix),w2=sqrt(uMix);
-  float sr=w1*A1*cos(-E1*uTime)+w2*A2*cos(-E2*uTime);
-  float si=w1*A1*sin(-E1*uTime)+w2*A2*sin(-E2*uTime);
-  float d=sr*sr+si*si;
-  d=log(1.+d*700.)/log(700.);
-  float phase=atan(si,sr);
-  fragColor=vec4(hsv2rgb(vec3(fract(phase/(2.*PI)),.88,d)),1.);
-}
-`
-
-const FRAG_RADIAL_PROB = /* glsl */`precision highp float;
-${GLSL_UTIL}${GLSL_HYDROGEN}
-uniform float uTime,uN,uL;
-in vec2 vUv; out vec4 fragColor;
-void main(){
-  float r=vUv.x*22.;
-  float Rnl=R_nl(int(uN),int(uL),r);
-  float prob=4.*PI*r*r*Rnl*Rnl;
-  float val=log(1.+prob*80.)/log(80.);
-  float y=vUv.y;
-  float line=smoothstep(.014,.0,abs(y-val));
-  float bohr=0.;
-  for(int ni=1;ni<=6;ni++){bohr+=smoothstep(.005,.0,abs(vUv.x-float(ni*ni)/22.))*.55;}
-  float hue=.55+vUv.x*.28+uTime*.015;
-  vec3 base=hsv2rgb(vec3(fract(hue),.6,val*.35));
-  fragColor=vec4(base+vec3(.9,.95,1.)*line+vec3(1.,.6,.2)*bohr,1.);
-}
-`
-
-const FRAG_ELECTRON_CLOUD = /* glsl */`precision highp float;
-${GLSL_UTIL}${GLSL_HYDROGEN}
-uniform float uTime,uN,uL,uM;
-in vec2 vUv; out vec4 fragColor;
-void main(){
-  vec2 p=(vUv-.5)*24.;
-  float accum=0.;
-  for(int iz=-3;iz<=3;iz++){
-    float z=float(iz)*2.;
-    float r=length(vec3(p,z)); if(r<.001)r=.001;
-    float theta=acos(clamp(z/r,-1.,1.)),phi=atan(p.y,p.x)+uTime*.08*float(iz+4);
-    float d=psiDensity(int(uN),int(uL),int(uM),r,theta,phi);
-    accum+=d/7.;
-  }
-  float th=.02+noise(p*.7+uTime*.1)*.015;
-  accum=log(1.+accum*1200.)/log(1200.);
-  float hue=fract(.6+accum*.4+uTime*.04);
-  vec3 col=hsv2rgb(vec3(hue,.8,accum));
-  fragColor=vec4(col,1.);
 }
 `
 
@@ -423,6 +292,380 @@ void main(){
 }
 `
 
+// ══ SURFACE — PBR hyperreal materials ═════════════════════════════════════════
+//
+// Each preset outputs albedo / tangent-space normal / ORM (AO, Roughness,
+// Metalness packed R/G/B per glTF convention) via a `uOutputMode` int uniform.
+// Normals are computed analytically from gradient-noise derivatives (no finite
+// differences) for perfect smooth results at any resolution.
+
+const GLSL_PBR_NOISE = /* glsl */`
+const float PI=3.14159265;
+
+// ── robust hashes (Dave Hoskins) ──────────────────────────────────────────
+vec2 hash22(vec2 p){
+  vec3 p3=fract(vec3(p.xyx)*vec3(.1031,.1030,.0973));
+  p3+=dot(p3,p3.yzx+33.33);
+  return fract((p3.xx+p3.yz)*p3.zy)*2.-1.;
+}
+float hash21(vec2 p){
+  vec3 p3=fract(vec3(p.xyx)*.1031);
+  p3+=dot(p3,p3.yzx+33.33);
+  return fract((p3.x+p3.y)*p3.z);
+}
+
+// ── 2D gradient noise with analytical derivatives → (value, dv/dx, dv/dy) ─
+vec3 noised2(vec2 x){
+  vec2 i=floor(x),f=fract(x);
+  vec2 u=f*f*f*(f*(f*6.-15.)+10.);
+  vec2 du=30.*f*f*(f*(f-2.)+1.);
+  vec2 ga=hash22(i),gb=hash22(i+vec2(1,0)),
+       gc=hash22(i+vec2(0,1)),gd=hash22(i+vec2(1,1));
+  float va=dot(ga,f),vb=dot(gb,f-vec2(1,0)),
+        vc=dot(gc,f-vec2(0,1)),vd=dot(gd,f-vec2(1,1));
+  float v=va+u.x*(vb-va)+u.y*(vc-va)+u.x*u.y*(va-vb-vc+vd);
+  vec2 d=ga+u.x*(gb-ga)+u.y*(gc-ga)+u.x*u.y*(ga-gb-gc+gd)
+    +du*(vec2(vb-va,vc-va)+u.yx*vec2(va-vb-vc+vd));
+  return vec3(v,d);
+}
+
+// ── FBM with chain-rule derivative accumulation ───────────────────────────
+vec3 fbmD(vec2 p,int oct,float lac,float gain){
+  float v=0.,a=1.,at=0.,freq=1.;vec2 d=vec2(0.);
+  for(int i=0;i<8;i++){if(i>=oct)break;
+    vec3 n=noised2(p);v+=a*n.x;d+=a*freq*n.yz;at+=a;
+    p*=lac;a*=gain;freq*=lac;}
+  return vec3(v/at,d/at);
+}
+
+// ── absolute-value turbulence ─────────────────────────────────────────────
+vec3 turbD(vec2 p,int oct,float lac,float gain){
+  float v=0.,a=1.,at=0.,freq=1.;vec2 d=vec2(0.);
+  for(int i=0;i<8;i++){if(i>=oct)break;
+    vec3 n=noised2(p);v+=a*abs(n.x);d+=a*freq*sign(n.x)*n.yz;at+=a;
+    p*=lac;a*=gain;freq*=lac;}
+  return vec3(v/at,d/at);
+}
+
+// ── ridge noise (sharp peaks / veins) ─────────────────────────────────────
+vec3 ridgeD(vec2 p,int oct,float lac,float gain){
+  float v=0.,a=1.,at=0.,w=1.,freq=1.;vec2 d=vec2(0.);
+  for(int i=0;i<8;i++){if(i>=oct)break;
+    vec3 n=noised2(p);float r=1.-abs(n.x);r*=r;
+    v+=a*w*r;d+=a*w*freq*2.*(1.-abs(n.x))*(-sign(n.x))*n.yz;
+    w=clamp(r*2.,0.,1.);at+=a;p*=lac;a*=gain;freq*=lac;}
+  return vec3(v/at,d/at);
+}
+
+// ── 2D Voronoi → (F1, F2, cellHash) ──────────────────────────────────────
+vec3 voronoi2(vec2 p){
+  vec2 i=floor(p),f=fract(p);float d1=9.,d2=9.;vec2 s1=vec2(0.);
+  for(int y=-1;y<=1;y++)for(int x=-1;x<=1;x++){
+    vec2 n=vec2(x,y),c=n+hash22(i+n)*.5+.5-f;float dd=dot(c,c);
+    if(dd<d1){d2=d1;d1=dd;s1=i+n;}else if(dd<d2)d2=dd;}
+  return vec3(sqrt(d1),sqrt(d2),hash21(s1));
+}
+
+// ── domain warp ───────────────────────────────────────────────────────────
+vec2 warp2(vec2 p,float str){
+  return p+str*vec2(noised2(p+vec2(0.,1.7)).x,noised2(p+vec2(5.2,3.1)).x);
+}
+
+// ── analytical derivatives → tangent-space normal ─────────────────────────
+vec3 heightNormal(vec2 d,float str){return normalize(vec3(-d*str,1.));}
+
+float smin(float a,float b,float k){
+  float h=clamp(.5+.5*(b-a)/k,0.,1.);return mix(b,a,h)-k*h*(1.-h);
+}
+vec3 hsv2rgb(vec3 c){
+  vec3 p=abs(fract(c.xxx+vec3(0.,2./3.,1./3.))*6.-3.);
+  return c.z*mix(vec3(1.),clamp(p-1.,0.,1.),c.y);
+}
+`
+
+// ── Surface presets ───────────────────────────────────────────────────────────
+
+const FRAG_SURFACE_WEATHERED_METAL = /* glsl */`precision highp float;
+${GLSL_PBR_NOISE}
+uniform float uTime;uniform int uOutputMode;
+uniform float uScale,uScratchDensity,uGrime;
+in vec2 vUv;out vec4 fragColor;
+void main(){
+  vec2 p=vUv*uScale;
+  vec3 brushN=fbmD(vec2(p.x,p.y*12.),6,2.2,.45);
+  float brushH=brushN.x*.12;
+  float scrA=noised2(p*2.3+7.).x*PI;
+  vec2 scrD=vec2(cos(scrA),sin(scrA));
+  float scrL=fract(dot(vUv*uScratchDensity,scrD)*50.);
+  float scratch=pow(smoothstep(.94,1.,scrL)*smoothstep(0.,.15,noised2(p*5.).x*.5+.5),.7);
+  vec3 vor=voronoi2(p*18.);
+  float pit=smoothstep(.08,.0,vor.x);
+  vec3 grimeN=fbmD(p*3.+11.,5,2.,.5);
+  float grime=smoothstep(.3,.8,grimeN.x*.5+.5)*uGrime;
+  grime*=smoothstep(.05,-.06,brushH-pit*.1);
+  float height=brushH-scratch*.06-pit*.12;
+  vec2 deriv=brushN.yz*.12+grimeN.yz*grime*.05;
+  vec3 metalCol=mix(vec3(.72,.73,.74),vec3(.64,.65,.67),brushN.x*.5+.5);
+  metalCol=mix(metalCol,vec3(.5,.52,.55),scratch*.5);
+  metalCol=mix(metalCol,vec3(.1,.08,.06),grime);
+  metalCol*=1.-pit*.3;
+  float rough=.25+brushN.x*.06;
+  rough=mix(rough,.7,scratch);rough=mix(rough,.6,pit);rough=mix(rough,.8,grime);
+  float metal=1.-grime*.9;
+  float ao=1.-pit*.5-grime*.3-scratch*.1;
+  vec3 norm=heightNormal(deriv,3.);
+  if(uOutputMode==1)fragColor=vec4(norm*.5+.5,1.);
+  else if(uOutputMode==2)fragColor=vec4(clamp(ao,0.,1.),clamp(rough,0.,1.),clamp(metal,0.,1.),1.);
+  else fragColor=vec4(metalCol,1.);
+}
+`
+
+const FRAG_SURFACE_MARBLE = /* glsl */`precision highp float;
+${GLSL_PBR_NOISE}
+uniform float uTime;uniform int uOutputMode;
+uniform float uScale,uVeinIntensity,uVeinFreq,uColorTemp;
+in vec2 vUv;out vec4 fragColor;
+void main(){
+  vec2 p=vUv*uScale;
+  vec2 wp=warp2(p,1.5);
+  vec3 vein1=turbD(wp*uVeinFreq,6,2.3,.5);
+  vec2 wp2=warp2(p+vec2(7.3,3.1),.8);
+  vec3 vein2=turbD(wp2*uVeinFreq*2.5+5.,5,2.1,.45);
+  vec3 zone=fbmD(p*.5+3.,3,2.,.5);
+  float v1=smoothstep(.4,.7,vein1.x)*uVeinIntensity;
+  float v2=smoothstep(.45,.65,vein2.x)*uVeinIntensity*.4;
+  float veinMask=max(v1,v2);
+  float height=-veinMask*.03;
+  vec2 deriv=-vein1.yz*v1*.03-vein2.yz*v2*.02;
+  vec3 baseCol=mix(vec3(.95,.93,.90),vec3(.92,.94,.96),zone.x*.5+.5);
+  baseCol=mix(baseCol,vec3(.97,.96,.92),uColorTemp);
+  vec3 veinCol=mix(vec3(.2,.18,.16),vec3(.55,.45,.3),vein2.x);
+  vec3 albedo=mix(baseCol,veinCol,veinMask);
+  float rough=.05+veinMask*.08+fbmD(p*20.,3,2.,.5).x*.015;
+  float metal=0.;
+  float ao=1.-veinMask*.15;
+  vec3 norm=heightNormal(deriv,2.);
+  if(uOutputMode==1)fragColor=vec4(norm*.5+.5,1.);
+  else if(uOutputMode==2)fragColor=vec4(clamp(ao,0.,1.),clamp(rough,0.,1.),metal,1.);
+  else fragColor=vec4(albedo,1.);
+}
+`
+
+const FRAG_SURFACE_ROUGH_STONE = /* glsl */`precision highp float;
+${GLSL_PBR_NOISE}
+uniform float uTime;uniform int uOutputMode;
+uniform float uScale,uCrackDepth,uWeathering,uMineralVar;
+in vec2 vUv;out vec4 fragColor;
+void main(){
+  vec2 p=vUv*uScale;
+  vec3 macro=fbmD(p,4,2.,.5);
+  vec3 detail=fbmD(p*4.+3.,5,2.2,.45);
+  vec3 grain=fbmD(p*25.+7.,3,2.,.4);
+  vec3 vor=voronoi2(p*3.);
+  float crackDist=vor.y-vor.x;
+  float crack=smoothstep(.06,.0,crackDist)*uCrackDepth;
+  vec2 wp=warp2(p*.7,2.);
+  float layer=sin(wp.y*8.+fbmD(wp,3,2.,.5).x*3.)*.5+.5;
+  float height=macro.x*.15+detail.x*.05+grain.x*.01-crack*.2;
+  vec2 deriv=macro.yz*.15+detail.yz*.05+grain.yz*.01;
+  vec3 baseGray=mix(vec3(.45,.43,.40),vec3(.55,.52,.48),macro.x*.5+.5);
+  vec3 albedo=mix(baseGray,mix(vec3(.52,.42,.35),vec3(.40,.45,.50),layer),uMineralVar);
+  albedo=mix(albedo,albedo*.3,crack);
+  float weather=fbmD(p*1.5+20.,4,2.,.5).x*.5+.5;
+  albedo=mix(albedo,albedo*vec3(.85,.9,.8),smoothstep(.4,.7,weather)*uWeathering);
+  float rough=.65+detail.x*.1+grain.x*.05;
+  rough=mix(rough,.5,smoothstep(.04,.0,crackDist));
+  float ao=1.-crack*.7-smoothstep(0.,-.1,macro.x)*.2;
+  vec3 norm=heightNormal(deriv,4.);
+  if(uOutputMode==1)fragColor=vec4(norm*.5+.5,1.);
+  else if(uOutputMode==2)fragColor=vec4(clamp(ao,0.,1.),clamp(rough,0.,1.),0.,1.);
+  else fragColor=vec4(albedo,1.);
+}
+`
+
+const FRAG_SURFACE_AGED_WOOD = /* glsl */`precision highp float;
+${GLSL_PBR_NOISE}
+uniform float uTime;uniform int uOutputMode;
+uniform float uScale,uRingFreq,uGrainStrength,uAge;
+in vec2 vUv;out vec4 fragColor;
+void main(){
+  vec2 p=vUv*uScale;
+  vec2 wp=warp2(p*.8,.6);
+  float dist=length(wp-vec2(uScale*.5));
+  float rings=sin(dist*uRingFreq+turbD(p*2.,4,2.,.5).x*4.)*.5+.5;
+  float angle=atan(wp.y-uScale*.5,wp.x-uScale*.5);
+  vec3 grainN=fbmD(vec2(p.x+sin(angle)*.3,p.y*15.),5,2.3,.45);
+  float fiber=grainN.x*uGrainStrength;
+  vec3 knotVor=voronoi2(p*.8);
+  float knotMask=smoothstep(.35,.1,knotVor.x)*step(knotVor.z,.15);
+  float knotRing=sin(knotVor.x*40.)*.5+.5;
+  vec3 ageCrack=ridgeD(p*6.,4,2.,.5);
+  float crack=smoothstep(.7,.9,ageCrack.x)*uAge;
+  float height=rings*.03+fiber*.02-crack*.04+knotMask*knotRing*.03;
+  vec2 deriv=grainN.yz*.02+ageCrack.yz*crack*.04;
+  vec3 earlyWood=vec3(.65,.45,.25);
+  vec3 lateWood=vec3(.4,.25,.12);
+  vec3 woodCol=mix(earlyWood,lateWood,rings);
+  woodCol+=fiber*vec3(.08,.05,.02);
+  woodCol=mix(woodCol,vec3(.35,.22,.1),knotMask);
+  woodCol=mix(woodCol,woodCol*.7,crack);
+  woodCol*=mix(1.,.8,uAge*.5);
+  float rough=.45+rings*.1;
+  rough=mix(rough,.7,crack);rough+=fiber*.05;
+  float ao=1.-crack*.5-knotMask*.2;
+  vec3 norm=heightNormal(deriv,3.);
+  if(uOutputMode==1)fragColor=vec4(norm*.5+.5,1.);
+  else if(uOutputMode==2)fragColor=vec4(clamp(ao,0.,1.),clamp(rough,0.,1.),0.,1.);
+  else fragColor=vec4(woodCol,1.);
+}
+`
+
+const FRAG_SURFACE_RUST_IRON = /* glsl */`precision highp float;
+${GLSL_PBR_NOISE}
+uniform float uTime;uniform int uOutputMode;
+uniform float uScale,uCorrosion,uPitting,uCleanPatches;
+in vec2 vUv;out vec4 fragColor;
+void main(){
+  vec2 p=vUv*uScale;
+  vec2 wp=warp2(p,1.2);
+  vec3 corr=fbmD(wp*2.,6,2.1,.5);
+  float corrLevel=corr.x*.5+.5;
+  corrLevel=smoothstep(1.-uCorrosion,1.,corrLevel);
+  vec3 patchN=fbmD(p*1.5+30.,4,2.,.5);
+  float cleanMask=smoothstep(.5,.8,patchN.x*.5+.5)*uCleanPatches*(1.-corrLevel*.5);
+  vec3 vor=voronoi2(p*uPitting);
+  float pit=smoothstep(.1,.0,vor.x);
+  vec3 flakeN=ridgeD(p*8.+5.,4,2.2,.45);
+  float flake=smoothstep(.6,.85,flakeN.x)*corrLevel;
+  float height=-corrLevel*.1-pit*.15+flake*.05+cleanMask*.02;
+  vec2 deriv=corr.yz*corrLevel*.1+flakeN.yz*flake*.05;
+  vec3 cleanMetal=vec3(.6,.62,.64);
+  vec3 rustCol=mix(vec3(.15,.12,.1),vec3(.55,.2,.08),smoothstep(.2,.6,corrLevel));
+  rustCol=mix(rustCol,vec3(.7,.35,.1),smoothstep(.6,.95,corrLevel));
+  rustCol+=vec3(.1,.05,0.)*fbmD(p*12.,3,2.,.5).x;
+  vec3 albedo=mix(rustCol,cleanMetal,cleanMask);
+  albedo=mix(albedo,albedo*.4,pit);
+  float rough=mix(.85,.3,cleanMask)+corrLevel*.1+flake*.1;
+  float metal=mix(.1,.95,cleanMask);
+  float ao=1.-pit*.6-flake*.2;
+  vec3 norm=heightNormal(deriv,4.);
+  if(uOutputMode==1)fragColor=vec4(norm*.5+.5,1.);
+  else if(uOutputMode==2)fragColor=vec4(clamp(ao,0.,1.),clamp(rough,0.,1.),clamp(metal,0.,1.),1.);
+  else fragColor=vec4(albedo,1.);
+}
+`
+
+const FRAG_SURFACE_CRACKED_EARTH = /* glsl */`precision highp float;
+${GLSL_PBR_NOISE}
+uniform float uTime;uniform int uOutputMode;
+uniform float uScale,uCrackWidth,uDryness,uDustColor;
+in vec2 vUv;out vec4 fragColor;
+void main(){
+  vec2 p=vUv*uScale;
+  vec3 vor=voronoi2(p*3.);
+  float edgeDist=vor.y-vor.x;
+  float crack=smoothstep(uCrackWidth,.0,edgeDist);
+  float crackEdge=smoothstep(uCrackWidth*2.,uCrackWidth*.5,edgeDist);
+  vec3 vor2=voronoi2(p*8.+1.);
+  float crack2=smoothstep(uCrackWidth*.5,.0,vor2.y-vor2.x)*.5;
+  vec3 surfN=fbmD(p*15.,5,2.1,.45);
+  float dome=1.-smoothstep(0.,.5,vor.x);
+  float height=dome*.08+surfN.x*.02-crack*.15-crack2*.05;
+  float curl=crackEdge*(1.-crack)*.03;
+  height+=curl;
+  vec2 deriv=surfN.yz*.02;
+  vec3 dryCol=mix(vec3(.6,.48,.32),vec3(.7,.55,.38),uDustColor);
+  vec3 cellCol=mix(vec3(.35,.28,.18),dryCol,uDryness);
+  cellCol*=.9+surfN.x*.15+vor.z*.08;
+  vec3 crackCol=vec3(.2,.15,.1)*(1.-crack*.5);
+  vec3 albedo=mix(cellCol,crackCol,max(crack,crack2));
+  albedo=mix(albedo,dryCol*1.15,curl*8.);
+  // crack wall normals via finite-difference on Voronoi edge distance
+  if(crack>.01){
+    float dEx=(voronoi2((p+vec2(.001,0.))*3.).y-voronoi2((p+vec2(.001,0.))*3.).x)-edgeDist;
+    float dEy=(voronoi2((p+vec2(0.,.001))*3.).y-voronoi2((p+vec2(0.,.001))*3.).x)-edgeDist;
+    deriv+=vec2(dEx,dEy)*crack*80.;
+  }
+  float rough=.75+surfN.x*.08-crack*.1;
+  float ao=1.-crack*.7-crack2*.3;
+  vec3 norm=heightNormal(deriv,3.5);
+  if(uOutputMode==1)fragColor=vec4(norm*.5+.5,1.);
+  else if(uOutputMode==2)fragColor=vec4(clamp(ao,0.,1.),clamp(rough,0.,1.),0.,1.);
+  else fragColor=vec4(albedo,1.);
+}
+`
+
+const FRAG_SURFACE_CONCRETE = /* glsl */`precision highp float;
+${GLSL_PBR_NOISE}
+uniform float uTime;uniform int uOutputMode;
+uniform float uScale,uAggregate,uCrackDensity,uStaining;
+in vec2 vUv;out vec4 fragColor;
+void main(){
+  vec2 p=vUv*uScale;
+  vec3 fineN=fbmD(p*20.,5,2.2,.45);
+  vec3 aggVor=voronoi2(p*uAggregate);
+  float aggMask=smoothstep(.25,.15,aggVor.x);
+  float aggBump=aggMask*(.5+hash21(floor(p*uAggregate+.5))*.5);
+  vec3 poreVor=voronoi2(p*35.);
+  float pore=smoothstep(.04,.0,poreVor.x);
+  vec3 crackVor=voronoi2(p*uCrackDensity);
+  float crackDist=crackVor.y-crackVor.x;
+  float crack=smoothstep(.03,.0,crackDist);
+  vec3 stainN=fbmD(p*.8+15.,4,2.,.5);
+  float stain=smoothstep(.2,.6,stainN.x*.5+.5)*uStaining;
+  float form=fbmD(vec2(p.x*.5,p.y*8.),3,2.,.5).x*.3;
+  float height=fineN.x*.015+aggBump*.04-pore*.03-crack*.02;
+  vec2 deriv=fineN.yz*.015;
+  vec3 cementCol=vec3(.62,.60,.57)+fineN.x*vec3(.04);
+  vec3 aggCol=mix(vec3(.55,.53,.50),vec3(.68,.65,.60),aggVor.z);
+  vec3 albedo=mix(cementCol,aggCol,aggMask);
+  albedo=mix(albedo,albedo*.5,pore);
+  albedo=mix(albedo,albedo*.6,crack);
+  albedo=mix(albedo,albedo*vec3(.85,.87,.82),stain);
+  albedo+=form*.04;
+  float rough=.7+fineN.x*.08-aggMask*.1+pore*.1;
+  float ao=1.-pore*.5-crack*.4;
+  vec3 norm=heightNormal(deriv,2.5);
+  if(uOutputMode==1)fragColor=vec4(norm*.5+.5,1.);
+  else if(uOutputMode==2)fragColor=vec4(clamp(ao,0.,1.),clamp(rough,0.,1.),0.,1.);
+  else fragColor=vec4(albedo,1.);
+}
+`
+
+const FRAG_SURFACE_LAVA = /* glsl */`precision highp float;
+${GLSL_PBR_NOISE}
+uniform float uTime;uniform int uOutputMode;
+uniform float uScale,uCrackGlow,uCoolness,uFlowSpeed;
+in vec2 vUv;out vec4 fragColor;
+void main(){
+  vec2 p=vUv*uScale;
+  float t=uTime*uFlowSpeed;
+  vec3 vor=voronoi2(p*3.+vec2(t*.02));
+  float edgeDist=vor.y-vor.x;
+  float crack=smoothstep(.08,.0,edgeDist);
+  float plate=vor.x;
+  vec2 flow=warp2(p+vec2(t*.05,0.),1.5);
+  vec3 flowN=fbmD(flow*4.,5,2.1,.48);
+  float temp=crack*uCrackGlow+(1.-plate)*.3;
+  temp*=(1.-uCoolness);
+  temp+=flowN.x*.15*(1.-uCoolness);
+  temp=clamp(temp,0.,1.);
+  vec3 surfN=fbmD(p*12.,4,2.2,.45);
+  float height=-crack*.2+plate*.05+surfN.x*.02;
+  vec2 deriv=surfN.yz*.02+flowN.yz*.03;
+  vec3 basalt=vec3(.08,.07,.06)+surfN.x*vec3(.03);
+  vec3 albedo=mix(basalt,basalt*.5,crack*(1.-temp));
+  vec3 emissive=mix(vec3(1.,.15,0.),vec3(1.,.8,.2),temp)*temp*3.;
+  float rough=mix(.3,.85,1.-temp);
+  float ao=1.-crack*.3*(1.-temp);
+  vec3 norm=heightNormal(deriv,3.);
+  if(uOutputMode==1)fragColor=vec4(norm*.5+.5,1.);
+  else if(uOutputMode==2)fragColor=vec4(clamp(ao,0.,1.),clamp(rough,0.,1.),0.,1.);
+  else if(uOutputMode==3)fragColor=vec4(emissive,1.);
+  else fragColor=vec4(albedo,1.);
+}
+`
+
 // ── TypeScript runtime ────────────────────────────────────────────────────────
 
 type UniformMap = Record<string, THREE.IUniform>
@@ -466,82 +709,6 @@ function paramsGet(p: Record<string, number> | undefined, key: string, def: numb
 }
 
 // ── Preset builders ───────────────────────────────────────────────────────────
-
-function buildAtomic(
-  renderer: THREE.WebGLRenderer,
-  preset: string,
-  res: number,
-  params: Record<string, number> | undefined,
-  bake = false
-): ProceduralTextureHandle {
-  const rt = makeRT(res, bake)
-  let frag: string
-  let uniforms: UniformMap
-
-  if (preset === 'orbital_phase') {
-    frag = FRAG_ORBITAL_PHASE
-    uniforms = {
-      uTime:   { value: 0 },
-      uN:      { value: paramsGet(params, 'n', 2) },
-      uL:      { value: paramsGet(params, 'l', 1) },
-      uM:      { value: paramsGet(params, 'm', 0) },
-      uSliceZ: { value: paramsGet(params, 'slice_z', 0) },
-    }
-  } else if (preset === 'interference') {
-    frag = FRAG_INTERFERENCE
-    uniforms = {
-      uTime:   { value: 0 },
-      uN1:     { value: paramsGet(params, 'n1', 2) },
-      uL1:     { value: paramsGet(params, 'l1', 1) },
-      uM1:     { value: paramsGet(params, 'm1', 0) },
-      uN2:     { value: paramsGet(params, 'n2', 3) },
-      uL2:     { value: paramsGet(params, 'l2', 2) },
-      uM2:     { value: paramsGet(params, 'm2', 1) },
-      uMix:    { value: paramsGet(params, 'mix', 0.5) },
-      uSliceZ: { value: paramsGet(params, 'slice_z', 0) },
-    }
-  } else if (preset === 'radial_probability') {
-    frag = FRAG_RADIAL_PROB
-    uniforms = {
-      uTime: { value: 0 },
-      uN:    { value: paramsGet(params, 'n', 2) },
-      uL:    { value: paramsGet(params, 'l', 1) },
-    }
-  } else if (preset === 'electron_cloud') {
-    frag = FRAG_ELECTRON_CLOUD
-    uniforms = {
-      uTime: { value: 0 },
-      uN:    { value: paramsGet(params, 'n', 3) },
-      uL:    { value: paramsGet(params, 'l', 2) },
-      uM:    { value: paramsGet(params, 'm', 0) },
-    }
-  } else {
-    // default: orbital_density
-    frag = FRAG_ORBITAL_DENSITY
-    uniforms = {
-      uTime:   { value: 0 },
-      uN:      { value: paramsGet(params, 'n', 2) },
-      uL:      { value: paramsGet(params, 'l', 1) },
-      uM:      { value: paramsGet(params, 'm', 0) },
-      uSliceZ: { value: paramsGet(params, 'slice_z', 0) },
-    }
-  }
-
-  const mat = makeMat(frag, uniforms)
-  renderQuad(renderer, mat, rt)
-  // For baked static presets, generate mipmaps immediately
-  if (bake) renderer.initTexture(rt.texture)
-
-  return {
-    texture: rt.texture,
-    dispose() { rt.dispose(); mat.dispose() },
-    updateTime(t) {
-      if (bake) return // baked — never re-render
-      uniforms.uTime.value = t
-      renderQuad(renderer, mat, rt)
-    },
-  }
-}
 
 function buildCellular(
   renderer: THREE.WebGLRenderer,
@@ -707,6 +874,153 @@ function buildMaterial(
   }
 }
 
+// ── Surface builder (multi-map PBR pipeline) ─────────────────────────────────
+
+function buildSurface(
+  renderer: THREE.WebGLRenderer,
+  preset: string,
+  res: number,
+  params: Record<string, number> | undefined,
+  bake = true
+): ProceduralTextureHandle {
+  let frag: string
+  let uniforms: UniformMap
+  let hasEmissive = false
+
+  switch (preset) {
+    case 'weathered_metal':
+      frag = FRAG_SURFACE_WEATHERED_METAL
+      uniforms = {
+        uTime: { value: 0 }, uOutputMode: { value: 0 },
+        uScale: { value: paramsGet(params, 'scale', 8) },
+        uScratchDensity: { value: paramsGet(params, 'scratch_density', 40) },
+        uGrime: { value: paramsGet(params, 'grime', 0.4) },
+      }
+      break
+    case 'marble':
+      frag = FRAG_SURFACE_MARBLE
+      uniforms = {
+        uTime: { value: 0 }, uOutputMode: { value: 0 },
+        uScale: { value: paramsGet(params, 'scale', 6) },
+        uVeinIntensity: { value: paramsGet(params, 'vein_intensity', 0.8) },
+        uVeinFreq: { value: paramsGet(params, 'vein_freq', 3) },
+        uColorTemp: { value: paramsGet(params, 'color_temp', 0.3) },
+      }
+      break
+    case 'rough_stone':
+      frag = FRAG_SURFACE_ROUGH_STONE
+      uniforms = {
+        uTime: { value: 0 }, uOutputMode: { value: 0 },
+        uScale: { value: paramsGet(params, 'scale', 6) },
+        uCrackDepth: { value: paramsGet(params, 'crack_depth', 0.8) },
+        uWeathering: { value: paramsGet(params, 'weathering', 0.5) },
+        uMineralVar: { value: paramsGet(params, 'mineral_variation', 0.4) },
+      }
+      break
+    case 'aged_wood':
+      frag = FRAG_SURFACE_AGED_WOOD
+      uniforms = {
+        uTime: { value: 0 }, uOutputMode: { value: 0 },
+        uScale: { value: paramsGet(params, 'scale', 5) },
+        uRingFreq: { value: paramsGet(params, 'ring_freq', 20) },
+        uGrainStrength: { value: paramsGet(params, 'grain_strength', 0.3) },
+        uAge: { value: paramsGet(params, 'age', 0.4) },
+      }
+      break
+    case 'rust_iron':
+      frag = FRAG_SURFACE_RUST_IRON
+      uniforms = {
+        uTime: { value: 0 }, uOutputMode: { value: 0 },
+        uScale: { value: paramsGet(params, 'scale', 6) },
+        uCorrosion: { value: paramsGet(params, 'corrosion', 0.7) },
+        uPitting: { value: paramsGet(params, 'pitting', 15) },
+        uCleanPatches: { value: paramsGet(params, 'clean_patches', 0.3) },
+      }
+      break
+    case 'cracked_earth':
+      frag = FRAG_SURFACE_CRACKED_EARTH
+      uniforms = {
+        uTime: { value: 0 }, uOutputMode: { value: 0 },
+        uScale: { value: paramsGet(params, 'scale', 4) },
+        uCrackWidth: { value: paramsGet(params, 'crack_width', 0.06) },
+        uDryness: { value: paramsGet(params, 'dryness', 0.8) },
+        uDustColor: { value: paramsGet(params, 'dust_color', 0.5) },
+      }
+      break
+    case 'concrete':
+      frag = FRAG_SURFACE_CONCRETE
+      uniforms = {
+        uTime: { value: 0 }, uOutputMode: { value: 0 },
+        uScale: { value: paramsGet(params, 'scale', 6) },
+        uAggregate: { value: paramsGet(params, 'aggregate', 8) },
+        uCrackDensity: { value: paramsGet(params, 'crack_density', 2) },
+        uStaining: { value: paramsGet(params, 'staining', 0.3) },
+      }
+      break
+    case 'lava':
+      hasEmissive = true
+      frag = FRAG_SURFACE_LAVA
+      uniforms = {
+        uTime: { value: 0 }, uOutputMode: { value: 0 },
+        uScale: { value: paramsGet(params, 'scale', 4) },
+        uCrackGlow: { value: paramsGet(params, 'crack_glow', 0.8) },
+        uCoolness: { value: paramsGet(params, 'coolness', 0.4) },
+        uFlowSpeed: { value: paramsGet(params, 'flow_speed', 0.1) },
+      }
+      break
+    default:
+      throw new Error(`Unknown surface preset: ${preset}`)
+  }
+
+  const mat = makeMat(frag, uniforms)
+
+  const rtAlbedo = makeRT(res, bake)
+  const rtNormal = makeRT(res, bake)
+  const rtORM    = makeRT(res, bake)
+  const rtEmissive = hasEmissive ? makeRT(res, bake) : undefined
+
+  function renderAll(): void {
+    uniforms.uOutputMode.value = 0
+    renderQuad(renderer, mat, rtAlbedo)
+    uniforms.uOutputMode.value = 1
+    renderQuad(renderer, mat, rtNormal)
+    uniforms.uOutputMode.value = 2
+    renderQuad(renderer, mat, rtORM)
+    if (rtEmissive) {
+      uniforms.uOutputMode.value = 3
+      renderQuad(renderer, mat, rtEmissive)
+    }
+  }
+
+  renderAll()
+
+  if (bake) {
+    renderer.initTexture(rtAlbedo.texture)
+    renderer.initTexture(rtNormal.texture)
+    renderer.initTexture(rtORM.texture)
+    if (rtEmissive) renderer.initTexture(rtEmissive.texture)
+  }
+
+  rtNormal.texture.colorSpace = THREE.LinearSRGBColorSpace
+  rtORM.texture.colorSpace = THREE.LinearSRGBColorSpace
+
+  return {
+    texture: rtAlbedo.texture,
+    normalMap: rtNormal.texture,
+    ormMap: rtORM.texture,
+    emissiveMap: rtEmissive?.texture,
+    dispose() {
+      rtAlbedo.dispose(); rtNormal.dispose(); rtORM.dispose()
+      rtEmissive?.dispose(); mat.dispose()
+    },
+    updateTime(t) {
+      if (bake) return
+      uniforms.uTime.value = t
+      renderAll()
+    },
+  }
+}
+
 // ── Public API ────────────────────────────────────────────────────────────────
 
 export function buildProceduralTexture(
@@ -718,9 +1032,9 @@ export function buildProceduralTexture(
   const p    = opts.params
 
   switch (opts.domain) {
-    case 'atomic':   return buildAtomic(renderer, opts.preset, res, p, bake)
     case 'cellular': return buildCellular(renderer, opts.preset, res, p, bake)
     case 'material': return buildMaterial(renderer, opts.preset, res, p, bake)
+    case 'surface':  return buildSurface(renderer, opts.preset, res, p, bake)
     default: throw new Error(`Unknown texture domain: ${String(opts.domain)}`)
   }
 }
